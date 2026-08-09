@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en" dir="ltr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TradeAI · تحلیل هوشمند</title>
+  <link rel="icon" type="image/webp" href="{{ url_for('static', filename='tradeai-logo.webp') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}?v=20260801-7">
+</head>
+<body>
+  <main class="container">
+    <a class="app-logo-link" href="{{ url_for('index') }}" aria-label="TradeAI home">
+      <img class="app-logo" src="{{ url_for('static', filename='tradeai-logo.webp') }}?v=20260527-1" alt="TradeAI logo">
+    </a>
+    <section class="card hero product-hero">
+      <span class="eyebrow">تصمیم معاملاتی شفاف‌تر، نه وعده سود</span>
+      <h1>TradeAI · تحلیل هوشمند</h1>
+      <p>داده زنده، RSI و MACD، سنجش نوسان، تحلیل چندبازه، بک‌تست و ژورنال معامله در یک داشبورد فارسی.</p>
+      <div class="card-actions">
+        <a class="btn btn-primary" href="{{ url_for('dashboard') }}">شروع تحلیل رایگان</a>
+        <a class="btn login-cta" href="{{ url_for('login') }}">ورود به حساب</a>
+        <a class="btn secondary-btn" href="#how-it-works">روش کار</a>
+      </div>
+      <p class="trust-note">امتیاز سیستم احتمال سود نیست؛ میزان هم‌جهتی شواهد فنی را نشان می‌دهد.</p>
+    </section>
+
+    <section class="landing-mentor" aria-labelledby="landingMentorTitle">
+      <div class="landing-mentor-portrait">
+        <img src="{{ url_for('static', filename='ostad-kavosh.webp') }}?v=20260801-1"
+             alt="استاد کاوش، راهنمای هوشمند معامله‌گری TradeAI">
+      </div>
+      <div class="landing-mentor-copy">
+        <span class="eyebrow">همراه اختصاصی اعضای TradeAI</span>
+        <h2 id="landingMentorTitle">با استاد کاوش آشنا شوید</h2>
+        <p>
+          استاد کاوش فقط یک چت‌بات پاسخ‌گو نیست؛ نقش استاد و مشاور معامله‌گری را هم‌زمان دارد.
+          تحلیل همین صفحه را برایتان ساده می‌کند، دربارهٔ RSI و MACD آموزش می‌دهد و پیش از ورود،
+          ریسک، حد ضرر و منطق معامله را با شما بررسی می‌کند.
+        </p>
+        <ul>
+          <li>آموزش قدم‌به‌قدم و متناسب با سؤال شما</li>
+          <li>مشاوره بر اساس نماد، تایم‌فریم و داده‌های همین داشبورد</li>
+          <li>بررسی سخت‌گیرانهٔ معامله، بدون وعدهٔ سود</li>
+        </ul>
+        <div class="landing-mentor-access">
+          <strong>با داشتن حساب کاربری، می‌توانید مستقیماً با استاد کاوش گفتگو کنید.</strong>
+          <a class="btn btn-primary" href="{{ url_for('login') }}">ورود و گفتگو با استاد</a>
+        </div>
+      </div>
+    </section>
+
+    <section id="how-it-works" class="landing-section">
+      <h2>چرا TradeAI؟</h2>
+      <div class="feature-grid">
+        <article class="feature-card"><span>01</span><h3>تحلیل قابل توضیح</h3><p>هر نتیجه با عوامل مؤثر، ریسک و شرایط ابطال نمایش داده می‌شود.</p></article>
+        <article class="feature-card"><span>02</span><h3>بک‌تست شفاف</h3><p>Win rate، بازده، افت سرمایه، Expectancy و Profit factor روی داده تاریخی محاسبه می‌شوند.</p></article>
+        <article class="feature-card"><span>03</span><h3>ریسک قبل از ورود</h3><p>حجم معامله، فاصله حد ضرر و مبلغ در معرض ریسک پیش از تصمیم مشخص می‌شود.</p></article>
+      </div>
+    </section>
+
+    <section class="landing-section">
+      <h2>پلن‌ها</h2>
+      <div class="pricing-grid">
+        <article class="pricing-card"><h3>آزمایشی</h3><strong>رایگان</strong><p>تحلیل محدود، بک‌تست و تجربه کامل جریان اصلی.</p><a class="btn" href="{{ url_for('dashboard') }}">شروع</a></article>
+        <article class="pricing-card featured"><span class="plan-badge">به‌زودی</span><h3>حرفه‌ای</h3><strong>اشتراک ماهانه</strong><p>گفتگو با استاد کاوش، تاریخچه کامل، ژورنال، هشدار و گزارش عملکرد.</p><a class="btn" href="{{ url_for('dashboard') }}">مشاهده محصول</a></article>
+      </div>
+      <p class="disclaimer-box">این سامانه ابزار تحلیل و برنامه‌ریزی است و توصیه سرمایه‌گذاری یا تضمین نتیجه محسوب نمی‌شود. عملکرد گذشته، نتیجه آینده را تضمین نمی‌کند.</p>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <a href="{{ url_for('index') }}" style="text-decoration:none;font-weight:700;">TradeAI Local · MetaTrader 5</a>
+  </footer>
+
+  <script src="{{ url_for('static', filename='dashboard.js') }}?v=20260629-2"></script>
+</body>
+</html>

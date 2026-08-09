@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en" dir="ltr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TradeAI · ورود</title>
+  <link rel="icon" type="image/webp" href="{{ url_for('static', filename='tradeai-logo.webp') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}?v=20260525-5">
+</head>
+<body>
+  <main class="container narrow">
+    <a class="app-logo-link" href="{{ url_for('index') }}" aria-label="TradeAI home">
+      <img class="app-logo" src="{{ url_for('static', filename='tradeai-logo.webp') }}?v=20260527-1" alt="TradeAI logo">
+    </a>
+    <section class="card">
+      <h1 data-i18n="login.title">Sign in</h1>
+
+      {% if error %}
+      <p class="error" data-i18n="login.error">Invalid username or password.</p>
+      {% endif %}
+
+      <form method="post" class="form-grid">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <label for="username" data-i18n="login.username">Username</label>
+        <input id="username" name="username" type="text" required>
+
+        <label for="password" data-i18n="login.password">Password</label>
+        <input id="password" name="password" type="password" required>
+
+        <button type="submit" class="btn" data-i18n="login.submit">Sign in</button>
+      </form>
+
+      <div class="card-actions">
+        <a class="link" href="{{ url_for('index') }}" data-i18n="login.back">Back to home</a>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <a href="{{ url_for('index') }}" style="text-decoration:none;font-weight:700;">TradeAI Local · MetaTrader 5</a>
+  </footer>
+
+  <script src="{{ url_for('static', filename='dashboard.js') }}?v=20260629-2"></script>
+</body>
+</html>

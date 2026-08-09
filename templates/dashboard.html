@@ -1,0 +1,567 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="csrf-token" content="{{ csrf_token }}">
+  <title>TradeAI · داشبورد</title>
+  <link rel="icon" type="image/webp" href="{{ url_for('static', filename='tradeai-logo.webp') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}?v=20260809-4">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <main class="container">
+    <a class="app-logo-link" href="{{ url_for('dashboard') }}" aria-label="TradeAI dashboard">
+      <img class="app-logo" src="{{ url_for('static', filename='tradeai-logo.webp') }}?v=20260527-1" alt="TradeAI logo">
+    </a>
+    <section class="card">
+      <div class="topbar">
+        <div>
+          <h1 data-i18n="dashboard.title">Forex Analysis Dashboard</h1>
+        </div>
+        <div class="topbar-meta">
+          <div id="sessionPill" class="session-pill">
+            <span data-i18n="session.label">Market session</span>
+            <strong id="sessionName">-</strong>
+          </div>
+          <button id="languageToggle" class="lang-toggle" type="button" aria-label="Switch language">FA</button>
+        </div>
+      </div>
+
+      <section class="mentor-card" aria-labelledby="mentorTitle">
+        <div class="mentor-portrait-wrap">
+          <img class="mentor-portrait"
+               src="{{ url_for('static', filename='ostad-kavosh.webp') }}?v=20260801-1"
+               alt="استاد کاوش، راهنمای تحلیل و مدیریت ریسک">
+        </div>
+        <div class="mentor-content">
+          <div class="mentor-heading">
+            <div>
+              <span class="setup-label" data-i18n="mentor.role">Trading mentor and advisor</span>
+              <h2 id="mentorTitle" data-i18n="mentor.name">Ostad Kavosh</h2>
+            </div>
+            <span class="mentor-status"><i></i><span data-i18n="mentor.available">Available</span></span>
+          </div>
+          <p id="mentorMessage" data-i18n="mentor.welcome">
+            I help you understand the analysis, check risk, and review your trade plan. Start by fetching market data.
+          </p>
+          <div class="mentor-modes" role="group" aria-label="Mentor mode">
+            <button type="button" class="mentor-mode active" data-mentor-mode="education" data-i18n="mentor.education">Teach me</button>
+            <button type="button" class="mentor-mode" data-mentor-mode="advice" data-i18n="mentor.advice">Advise me</button>
+            <button type="button" class="mentor-mode" data-mentor-mode="review" data-i18n="mentor.review">Review my trade</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="mt5-card" id="mt5Card" data-authenticated="{{ '1' if logged_in else '0' }}" aria-labelledby="mt5Title">
+        <div class="mt5-head">
+          <div>
+            <span class="setup-label" data-i18n="mt5.eyebrow">Local demo connection</span>
+            <h2 id="mt5Title" data-i18n="mt5.title">MetaTrader 5</h2>
+          </div>
+          <span class="mt5-status checking" id="mt5Status"><i></i><span data-i18n="mt5.checking">Checking connection…</span></span>
+        </div>
+        {% if logged_in %}
+        <div class="mt5-metrics" id="mt5Metrics">
+          <div class="metric"><span data-i18n="mt5.account">Account</span><strong id="mt5Account">-</strong></div>
+          <div class="metric"><span data-i18n="mt5.server">Server</span><strong id="mt5Server">-</strong></div>
+          <div class="metric"><span data-i18n="mt5.balance">Balance</span><strong id="mt5Balance">-</strong></div>
+          <div class="metric"><span data-i18n="mt5.equity">Equity</span><strong id="mt5Equity">-</strong></div>
+          <div class="metric"><span data-i18n="mt5.margin">Margin</span><strong id="mt5Margin">-</strong></div>
+          <div class="metric"><span>پوزیشن‌های باز</span><strong id="mt5OpenPositions">-</strong></div>
+          <div class="metric"><span>معاملات امروز</span><strong id="mt5DailyTrades">-</strong></div>
+          <div class="metric"><span>سود/زیان امروز</span><strong id="mt5DailyNet">-</strong></div>
+          <div class="metric"><span data-i18n="mt5.mode">Execution mode</span><strong id="mt5Mode">signal_only</strong></div>
+        </div>
+        <div class="mt5-actions">
+          <button id="mt5ConnectBtn" class="btn secondary-btn" type="button" data-i18n="mt5.connect">Check connection</button>
+          <button id="mt5FetchBtn" class="btn btn-primary" type="button" data-i18n="mt5.fetch">Load candles from MT5</button>
+          <span id="mt5Market" class="mt5-market">-</span>
+        </div>
+        <div class="mt5-settings">
+          <label><span data-i18n="mt5.minStrength">Minimum strength</span><input id="mt5MinStrength" type="number" min="50" max="88" value="70"></label>
+          <label><span data-i18n="mt5.maxSpread">Maximum spread (bps)</span><input id="mt5MaxSpread" type="number" min="0.1" max="20" step="0.1" value="3"></label>
+          <label><span data-i18n="mt5.riskPercent">Risk per signal (%)</span><input id="mt5RiskPercent" type="number" min="0.1" max="2" step="0.1" value="0.1"></label>
+          <label><span data-i18n="mt5.maxVolume">Maximum volume (lot)</span><input id="mt5MaxVolume" type="number" min="0.01" max="100" step="0.01" value="0.10"></label>
+          <label><span data-i18n="mt5.atrStop">ATR stop multiple</span><input id="mt5AtrStop" type="number" min="0.5" max="5" step="0.1" value="1.0"></label>
+          <label><span data-i18n="mt5.rewardRisk">Reward/Risk</span><input id="mt5RewardRisk" type="number" min="1" max="5" step="0.1" value="2.5"></label>
+          <label><span>حد زیان روزانه (%)</span><input id="mt5DailyLoss" type="number" min="0.25" max="5" step="0.25" value="1"></label>
+          <label><span>حد زیان متوالی</span><input id="mt5LossStreak" type="number" min="1" max="10" value="2"></label>
+          <label><span>توقف بعد از زیان (ساعت)</span><input id="mt5LossCooldown" type="number" min="4" max="72" value="12"></label>
+          <label><span>سقف معاملات روزانه</span><input id="mt5DailyTradesLimit" type="number" min="1" max="10" value="3"></label>
+          <label><span>حداقل اطمینان AI</span><input id="mt5AiConfidence" type="number" min="50" max="95" value="70"></label>
+        </div>
+        <button id="mt5SignalBtn" class="btn mt5-signal-btn" type="button">تحلیل کامل و آماده‌سازی معامله دمو</button>
+        <div id="mt5SignalResult" class="mt5-signal-result hidden"></div>
+        <div id="demoExecutionPanel" class="demo-execution hidden">
+          <strong>تأیید نهایی سفارش دمو</strong>
+          <p>پس از بررسی ورود، حد ضرر، هدف و حجم، عبارت <b>DEMO</b> را وارد کنید. هر توکن فقط یک‌بار و تا ۵ دقیقه معتبر است.</p>
+          <div class="demo-execution-row">
+            <input id="demoConfirmation" autocomplete="off" placeholder="DEMO" aria-label="تأیید سفارش دمو">
+            <button id="demoExecuteBtn" class="btn danger-btn" type="button">ارسال سفارش به حساب DEMO</button>
+          </div>
+          <small id="demoExecutionStatus" class="muted"></small>
+        </div>
+        <p class="mt5-safety">اجرای حساب واقعی قفل است. سفارش فقط پس از عبور بازار، خبر، H1/H4/D1، ریسک، AI، بررسی کارگزاری و تأیید دستی ارسال می‌شود.</p>
+        {% else %}
+        <div class="mt5-login-note">
+          <p data-i18n="mt5.loginRequired">Sign in to connect the local MetaTrader 5 terminal.</p>
+          <a class="btn login-cta" href="{{ url_for('login') }}" data-i18n="mt5.login">Sign in</a>
+        </div>
+        {% endif %}
+      </section>
+
+      <details class="tool-panel research-tools">
+        <summary>ابزارهای پژوهش و ورود دستی داده</summary>
+      <div class="split mt16">
+        <div class="panel">
+          <h2 data-i18n="live.title">Live price feed</h2>
+          <div class="form-grid">
+            <label for="symbol" data-i18n="live.symbol">Symbol (example: EUR/USD)</label>
+            <input id="symbol" type="text" value="XAU/USD">
+
+            <label for="interval" data-i18n="live.interval">Timeframe</label>
+            <select id="interval">
+              <option value="1min">1min</option>
+              <option value="5min">5min</option>
+              <option value="15min">15min</option>
+              <option value="30min">30min</option>
+              <option value="1h">1h</option>
+              <option value="4h" selected>4h</option>
+              <option value="1day">1day</option>
+            </select>
+
+            <label for="outputsize" data-i18n="live.outputsize">Candle count</label>
+            <input id="outputsize" type="number" min="30" max="500" value="500">
+
+            <button id="fetchLiveBtn" class="btn" type="button" data-i18n="live.fetch">Fetch live data</button>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2 data-i18n="manual.title">Manual data</h2>
+          <label for="prices" data-i18n="manual.prices">Closing prices (comma separated)</label>
+          <textarea id="prices" rows="8" placeholder="1.1020,1.1035,1.1018,..." required></textarea>
+        </div>
+      </div>
+      </details>
+
+      <section class="tool-panel mt16">
+        <h2 data-i18n="strategy.title">Strategy preset</h2>
+        <div class="preset-grid">
+          <label class="preset-option hidden" aria-hidden="true">
+            <input type="radio" name="strategyPreset" value="scalp">
+            <span>
+              <strong data-i18n="strategy.scalp">Scalp</strong>
+              <small data-i18n="strategy.scalpNote">Fast signals for short holds.</small>
+            </span>
+          </label>
+          <label class="preset-option hidden" aria-hidden="true">
+            <input type="radio" name="strategyPreset" value="day">
+            <span>
+              <strong data-i18n="strategy.day">Day trade</strong>
+              <small data-i18n="strategy.dayNote">Balanced intraday settings.</small>
+            </span>
+          </label>
+          <label class="preset-option hidden" aria-hidden="true">
+            <input type="radio" name="strategyPreset" value="swing">
+            <span>
+              <strong data-i18n="strategy.swing">Swing</strong>
+              <small data-i18n="strategy.swingNote">Smoother signals for longer moves.</small>
+            </span>
+          </label>
+          <label class="preset-option research-preset">
+            <input type="radio" name="strategyPreset" value="goldDemo" checked>
+            <span>
+              <strong data-i18n="strategy.goldDemo">Gold H4 · demo research</strong>
+              <small data-i18n="strategy.goldDemoNote">Walk-forward candidate; signals only, no orders.</small>
+            </span>
+          </label>
+        </div>
+      </section>
+
+      <form id="indicatorForm" class="form-grid mt16">
+        <div class="row indicator-options">
+          <div>
+            <label><input id="useRsi" type="checkbox" checked> <span data-i18n="ind.useRsi">Use RSI</span></label>
+            <div class="field-label">
+              <label for="rsiPeriod" data-i18n="ind.rsiPeriod">RSI sensitivity</label>
+              <button class="help-tip" type="button" aria-label="How RSI sensitivity works" data-i18n-title="tip.rsiPeriod">?</button>
+            </div>
+            <input id="rsiPeriod" class="period-input" type="number" min="1" value="21" required>
+          </div>
+          <div>
+            <label><input id="useMacd" type="checkbox" checked> <span data-i18n="ind.useMacd">Use MACD</span></label>
+            <div class="field-label">
+              <label for="macdShort" data-i18n="ind.macdShortPeriod">Fast trend check</label>
+              <button class="help-tip" type="button" aria-label="How fast trend check works" data-i18n-title="tip.macdShortPeriod">?</button>
+            </div>
+            <input id="macdShort" class="period-input" type="number" min="1" value="8" required>
+          </div>
+          <div>
+            <label><input id="useMacdLong" type="checkbox" checked> <span data-i18n="ind.macdLong">Enable MACD long period</span></label>
+            <div class="field-label">
+              <label for="macdLong" data-i18n="ind.macdLongPeriod">Slow trend check</label>
+              <button class="help-tip" type="button" aria-label="How slow trend check works" data-i18n-title="tip.macdLongPeriod">?</button>
+            </div>
+            <input id="macdLong" class="period-input" type="number" min="2" value="21" required>
+          </div>
+          <div>
+            <label><input id="useMacdSignal" type="checkbox" checked> <span data-i18n="ind.macdSignal">Enable MACD signal period</span></label>
+            <div class="field-label">
+              <label for="macdSignal" data-i18n="ind.macdSignalPeriod">Signal smoothing</label>
+              <button class="help-tip" type="button" aria-label="How signal smoothing works" data-i18n-title="tip.macdSignalPeriod">?</button>
+            </div>
+            <input id="macdSignal" class="period-input" type="number" min="1" value="5" required>
+          </div>
+          <div class="hidden" aria-hidden="true">
+            <label><input id="useTdigm" type="checkbox"> <span data-i18n="ind.tdigm">Enable TDIGM</span></label>
+            <div class="field-label">
+              <label for="tdigmValue" data-i18n="ind.tdigmValue">Extra confidence</label>
+              <button class="help-tip" type="button" aria-label="How extra confidence works" data-i18n-title="tip.tdigmValue">?</button>
+            </div>
+            <input id="tdigmValue" class="period-input" type="number" step="0.1" value="1.0">
+          </div>
+        </div>
+
+        <button type="submit" class="btn" data-i18n="ind.calculate">Calculate indicators</button>
+      </form>
+
+      <p id="errorBox" class="error hidden"></p>
+
+      <section id="setupCard" class="setup-card mt16 setup-wait">
+        <div class="setup-main">
+          <div>
+            <span class="setup-label" data-i18n="setup.label">Trading setup</span>
+            <h2 id="setupTitle" data-i18n="setup.emptyTitle">Waiting for calculation</h2>
+          </div>
+          <span id="setupBadge" class="setup-badge" data-i18n="setup.emptyBadge">No signal</span>
+        </div>
+        <p id="setupReason" class="setup-reason" data-i18n="setup.emptyReason">Calculate indicators to see the market setup.</p>
+        <button id="explainBtn" class="ghost-btn" type="button" data-i18n="setup.explain">Explain setup</button>
+        <p id="explainText" class="explain-text hidden"></p>
+        <div class="strength-row">
+          <div>
+            <span class="setup-label" data-i18n="setup.strength">Signal strength</span>
+            <strong id="setupStrengthText">-</strong>
+          </div>
+          <div class="strength-meter" aria-label="Signal strength">
+            <span id="setupStrengthBar"></span>
+          </div>
+        </div>
+      </section>
+
+      <section class="tool-panel mt16">
+        <h2 data-i18n="tradePlan.title">Trade plan</h2>
+        <div class="trade-plan-grid">
+          <div class="metric"><span data-i18n="tradePlan.entry">Entry area</span><strong id="planEntry">-</strong></div>
+          <div class="metric"><span data-i18n="tradePlan.stop">Stop loss</span><strong id="planStop">-</strong></div>
+          <div class="metric"><span data-i18n="tradePlan.target">Take profit</span><strong id="planTarget">-</strong></div>
+          <div class="metric"><span data-i18n="tradePlan.rr">Reward/Risk</span><strong id="planRr">-</strong></div>
+        </div>
+        <p id="planNote" class="muted" data-i18n="tradePlan.empty">Calculate indicators to build an estimated plan.</p>
+      </section>
+
+      <section class="decision mt16">
+        <h2 data-i18n="decision.title">Decision panel</h2>
+        <div class="decision-grid">
+          <div class="metric"><span data-i18n="decision.price">Latest price</span><strong id="mPrice">-</strong></div>
+          <div class="metric"><span data-i18n="decision.rsi">Latest RSI</span><strong id="mRsi">-</strong></div>
+          <div class="metric"><span data-i18n="decision.rsiState">RSI state</span><strong id="mRsiState">-</strong></div>
+          <div class="metric"><span data-i18n="decision.macdBias">MACD bias</span><strong id="mMacdBias">-</strong></div>
+          <div class="metric"><span data-i18n="decision.cross">MACD cross</span><strong id="mCross">-</strong></div>
+          <div class="metric"><span data-i18n="decision.action">System suggestion</span><strong id="mAction">-</strong></div>
+          <div class="metric"><span data-i18n="decision.confidence">Indicator agreement</span><strong id="mConfidence">-</strong></div>
+          <div class="metric"><span data-i18n="decision.risk">Risk</span><strong id="mRisk">-</strong></div>
+          <div class="metric"><span>ATR / volatility</span><strong id="mAtr">-</strong></div>
+          <div class="metric"><span>Multi-timeframe</span><strong id="mAlignment">-</strong></div>
+        </div>
+        <p id="systemNote" class="muted"></p>
+      </section>
+
+      <div class="charts mt16">
+        <div class="chart-card">
+          <h2>Price</h2>
+          <canvas id="priceChart"></canvas>
+        </div>
+        <div class="chart-card">
+          <h2>RSI</h2>
+          <canvas id="rsiChart"></canvas>
+        </div>
+        <div class="chart-card full">
+          <h2>MACD</h2>
+          <canvas id="macdChart"></canvas>
+        </div>
+      </div>
+
+      <section class="tool-panel mt16">
+        <div class="section-heading">
+          <div>
+            <h2 data-i18n="backtest.title">Strategy backtest</h2>
+            <p class="muted" data-i18n="backtest.note">Uses only information available at each historical entry. Results include estimated round-trip fees.</p>
+          </div>
+          <button id="backtestBtn" class="btn" type="button" data-i18n="backtest.run">Run backtest</button>
+        </div>
+        <div class="backtest-controls">
+          <label for="holdingBars" data-i18n="backtest.holding">Holding bars</label>
+          <input id="holdingBars" type="number" min="1" max="100" value="6">
+          <label for="feeBps" data-i18n="backtest.fee">Fee/spread per side (bps)</label>
+          <input id="feeBps" type="number" min="0" max="100" step="0.1" value="2">
+        </div>
+        <div id="backtestResult" class="backtest-result hidden"></div>
+      </section>
+
+      <div class="split mt16">
+        <section class="tool-panel">
+          <div class="section-heading">
+            <h2 data-i18n="history.title">Analysis history</h2>
+            <button id="refreshHistoryBtn" class="ghost-btn" type="button" data-i18n="history.refresh">Refresh</button>
+          </div>
+          <div id="historyList" class="record-list"><p class="muted">No saved analysis yet.</p></div>
+        </section>
+
+        <section class="tool-panel">
+          <h2 data-i18n="journal.title">Trading journal</h2>
+          <form id="journalForm" class="journal-form">
+            <input id="journalSymbol" aria-label="Journal symbol" value="EUR/USD" placeholder="EUR/USD" required>
+            <select id="journalDirection" aria-label="Journal direction">
+              <option value="buy" data-i18n="journal.buy">Buy</option>
+              <option value="sell" data-i18n="journal.sell">Sell</option>
+            </select>
+            <input id="journalEntry" type="number" step="any" min="0" value="1.10000" aria-label="Entry price" placeholder="Entry price" data-i18n-placeholder="journal.entry">
+            <input id="journalStop" type="number" step="any" min="0" value="1.09500" aria-label="Stop loss" placeholder="Stop loss" data-i18n-placeholder="journal.stop">
+            <input id="journalTarget" type="number" step="any" min="0" value="1.10750" aria-label="Take profit" placeholder="Take profit" data-i18n-placeholder="journal.target">
+            <input id="journalExit" type="number" step="any" min="0" aria-label="Exit price" placeholder="Exit price (optional)" data-i18n-placeholder="journal.exit">
+            <select id="journalStatus" aria-label="Journal status">
+              <option value="open" data-i18n="journal.open">Open</option>
+              <option value="won" data-i18n="journal.won">Won</option>
+              <option value="lost" data-i18n="journal.lost">Lost</option>
+              <option value="cancelled" data-i18n="journal.cancelled">Cancelled</option>
+            </select>
+            <input id="journalNotes" aria-label="Journal notes" placeholder="Notes" data-i18n-placeholder="journal.notes">
+            <button class="btn" type="submit" data-i18n="journal.save">Save entry</button>
+          </form>
+          <div id="journalList" class="record-list"><p class="muted">No journal entries yet.</p></div>
+        </section>
+      </div>
+
+      <section class="tool-panel mt16">
+        <h2 data-i18n="risk.title">Risk calculator</h2>
+        <div class="risk-grid">
+          <label for="accountBalance" data-i18n="risk.balance">Account balance</label>
+          <input id="accountBalance" type="number" min="0" step="10" value="1000">
+          <label for="riskPercent" data-i18n="risk.percent">Risk per trade (%)</label>
+          <input id="riskPercent" type="number" min="0.1" step="0.1" value="1">
+          <label for="stopPips" data-i18n="risk.stopPips">Stop distance (pips)</label>
+          <input id="stopPips" type="number" min="0.1" step="0.1" value="10">
+          <label for="pipValue" data-i18n="risk.pipValue">Pip value per 1 lot</label>
+          <input id="pipValue" type="number" min="0.1" step="0.1" value="10">
+        </div>
+        <div class="risk-result">
+          <span data-i18n="risk.result">Suggested position size</span>
+          <strong id="riskLotSize">-</strong>
+          <small id="riskAmount">-</small>
+        </div>
+      </section>
+
+      <section class="ai-panel mt16">
+        <h2>توضیح تکمیلی استاد کاوش</h2>
+        <div class="form-grid">
+          <label for="tradeProfile" data-i18n="ai.profile">Trading profile</label>
+          <select id="tradeProfile">
+            <option value="scalp" selected data-i18n="ai.scalp">Scalp (very fast short-term)</option>
+            <option value="day" data-i18n="ai.day">Day (intraday)</option>
+            <option value="swing" data-i18n="ai.swing">Swing (hours to days)</option>
+            <option value="nds" data-i18n="ai.nds">NDS (fast multi-condition confirmation)</option>
+          </select>
+          <label for="customMaxHoldingMinutes" data-i18n="ai.holding">Maximum holding time (minutes - adjustable for every profile)</label>
+          <input id="customMaxHoldingMinutes" type="number" min="1" value="30">
+        </div>
+        <button id="aiAnalyzeBtn" class="btn" type="button">توضیح انسانیِ تحلیل آماده‌شده</button>
+        <div id="aiStatus" class="status muted hidden"></div>
+        <div id="aiProgress" class="progress hidden" aria-hidden="true"><span></span></div>
+        <div id="aiResult" class="ai-result hidden"></div>
+      </section>
+
+      <div class="bottom-actions">
+        <span class="muted">{{ username }}</span>
+        <form method="post" action="{{ url_for('logout') }}">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button class="link link-button logout-link" type="submit" data-i18n="dashboard.logout">Logout</button>
+        </form>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <a href="{{ url_for('index') }}" style="text-decoration:none;font-weight:700;">TradeAI Local · MetaTrader 5</a>
+  </footer>
+
+  <!-- چت‌بات شناور آموزشی و بررسی ریسک -->
+  <button class="trade-fab" id="tradeFab" aria-label="گفتگو با استاد کاوش">
+    <img src="{{ url_for('static', filename='ostad-kavosh.webp') }}?v=20260801-1" alt="">
+  </button>
+  <div class="trade-chat" id="tradeChat" role="dialog" aria-label="دستیار تحلیل هوشمند">
+    <div class="tc-head">
+      <span class="tc-orb"><img src="{{ url_for('static', filename='ostad-kavosh.webp') }}?v=20260801-1" alt=""></span>
+      <div class="tc-title"><b>استاد کاوش</b><small>آموزش · مشاوره تحلیل · بررسی معامله</small></div>
+      <button class="tc-x" id="tradeChatClose" aria-label="بستن">×</button>
+    </div>
+    <div class="tc-status" id="tradeChatStatus"><span></span> آمادهٔ پاسخ‌گویی</div>
+    <div class="tc-body" id="tradeChatBody"></div>
+    <div class="tc-suggestions" id="tradeChatSuggestions">
+      <button type="button" data-question="تحلیل فعلی صفحه را ساده توضیح بده.">تحلیل این صفحه</button>
+      <button type="button" data-question="برای این معامله ریسک و حد ضرر را بررسی کن.">بررسی ریسک</button>
+      <button type="button" data-question="از این وضعیت یک نکته آموزشی به من یاد بده.">نکته آموزشی</button>
+    </div>
+    <form class="tc-foot" id="tradeChatForm">
+      <input id="tradeChatInput" autocomplete="off" placeholder="سؤال تحلیلی یا مدیریت ریسک خود را بنویسید…">
+      <button type="submit" aria-label="ارسال">➤</button>
+    </form>
+  </div>
+
+  <style>
+    .trade-fab{position:fixed;inset-inline-end:20px;inset-block-end:20px;z-index:60;width:56px;height:56px;border-radius:50%;
+      overflow:hidden;border:2px solid #ffd97a;cursor:pointer;font-size:24px;color:#0f1115;background:#101722;
+      box-shadow:0 8px 26px rgba(224,169,63,.45);}
+    .trade-fab img{width:100%;height:100%;object-fit:cover;object-position:50% 18%;transform:scale(1.34);transform-origin:center 22%;}
+    .trade-fab:hover{filter:brightness(1.06);}
+    .trade-chat{position:fixed;inset-inline-end:20px;inset-block-end:88px;z-index:61;width:min(370px,92vw);height:min(540px,76vh);
+      display:none;flex-direction:column;border-radius:18px;overflow:hidden;background:#12151c;border:1px solid rgba(255,255,255,.12);
+      box-shadow:0 24px 60px rgba(0,0,0,.55);font-family:inherit;}
+    .trade-chat.open{display:flex;}
+    .tc-head{display:flex;align-items:center;gap:10px;padding:13px 14px;background:rgba(255,255,255,.04);border-bottom:1px solid rgba(255,255,255,.08);}
+    .tc-orb{width:38px;height:38px;border:1px solid rgba(255,217,122,.34);border-radius:11px;display:grid;place-items:center;overflow:hidden;background:#101722;flex:none;}
+    .tc-orb img{width:100%;height:100%;object-fit:cover;object-position:50% 18%;transform:scale(1.28);transform-origin:center 20%;}
+    .tc-title b{display:block;font-size:14px;color:#eef1f6;}
+    .tc-title small{font-size:11px;color:#9aa3b4;}
+    .tc-x{margin-inline-start:auto;background:transparent;border:0;color:#9aa3b4;font-size:22px;cursor:pointer;line-height:1;}
+    .tc-status{padding:6px 14px;color:#aab3c2;font-size:11px;background:rgba(255,255,255,.025);border-bottom:1px solid rgba(255,255,255,.06);}
+    .tc-status span{display:inline-block;width:7px;height:7px;margin-inline-end:6px;border-radius:50%;background:#53d69a;box-shadow:0 0 8px rgba(83,214,154,.7);}
+    .tc-status.busy span{background:#ffd97a;box-shadow:0 0 8px rgba(255,217,122,.7);}
+    .tc-status.error span{background:#ff7272;box-shadow:0 0 8px rgba(255,114,114,.7);}
+    .tc-body{flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:10px;}
+    .tc-msg{max-width:86%;padding:9px 12px;border-radius:12px;font-size:13px;line-height:1.8;white-space:pre-wrap;}
+    .tc-msg.bot{align-self:flex-start;background:rgba(255,255,255,.06);color:#e7e9ef;border:1px solid rgba(255,255,255,.08);}
+    .tc-msg.user{align-self:flex-end;background:linear-gradient(145deg,#ffd97a,#e0a93f);color:#0f1115;font-weight:600;}
+    .tc-msg.typing{opacity:.65;font-style:italic;}
+    .tc-suggestions{display:flex;gap:6px;padding:0 10px 9px;overflow-x:auto;}
+    .tc-suggestions button{flex:none;border:1px solid rgba(255,217,122,.28);border-radius:999px;background:rgba(255,217,122,.07);color:#e7e9ef;padding:6px 9px;font:inherit;font-size:11px;cursor:pointer;}
+    .tc-suggestions button:hover{background:rgba(255,217,122,.14);}
+    .tc-foot{display:flex;gap:8px;padding:10px;border-top:1px solid rgba(255,255,255,.08);}
+    .tc-foot input{flex:1;padding:10px 12px;border-radius:10px;border:1px solid rgba(255,255,255,.14);background:rgba(255,255,255,.04);color:#e7e9ef;font-family:inherit;outline:none;}
+    .tc-foot input:focus{border-color:#e0a93f;}
+    .tc-foot button{width:42px;border-radius:10px;border:0;cursor:pointer;background:linear-gradient(145deg,#ffd97a,#e0a93f);color:#0f1115;font-size:16px;}
+  </style>
+
+  <script>
+    (function () {
+      var fab = document.getElementById('tradeFab');
+      var panel = document.getElementById('tradeChat');
+      var body = document.getElementById('tradeChatBody');
+      var form = document.getElementById('tradeChatForm');
+      var input = document.getElementById('tradeChatInput');
+      var status = document.getElementById('tradeChatStatus');
+      var suggestions = document.getElementById('tradeChatSuggestions');
+      var history = [];
+      var greeted = false;
+      var sending = false;
+
+      function add(role, text) {
+        var el = document.createElement('div');
+        el.className = 'tc-msg ' + (role === 'user' ? 'user' : 'bot');
+        el.textContent = text;
+        body.appendChild(el); body.scrollTop = body.scrollHeight;
+        return el;
+      }
+
+      // وضعیت صفحه (اندیکاتورهای انتخابی، نماد، تایم‌فریم و جمع‌بندی) برای دستیار
+      function pageContext() {
+        function val(id) { var e = document.getElementById(id); return e ? e.value : ''; }
+        function txt(id) { var e = document.getElementById(id); return e ? (e.textContent || '').trim() : ''; }
+        var inds = [];
+        if (document.getElementById('useRsi') && document.getElementById('useRsi').checked) inds.push('RSI');
+        if (document.getElementById('useMacd') && document.getElementById('useMacd').checked) inds.push('MACD');
+        if (document.getElementById('useMacdLong') && document.getElementById('useMacdLong').checked) inds.push('MACD long');
+        if (document.getElementById('useMacdSignal') && document.getElementById('useMacdSignal').checked) inds.push('MACD signal');
+        if (document.getElementById('useTdigm') && document.getElementById('useTdigm').checked) inds.push('TDIGM');
+        var decision = [
+          'قیمت=' + txt('mPrice'), 'RSI=' + txt('mRsi'), 'وضعیت RSI=' + txt('mRsiState'),
+          'بایاس MACD=' + txt('mMacdBias'), 'کراس=' + txt('mCross'),
+          'پیشنهاد=' + txt('mAction'), 'اطمینان=' + txt('mConfidence'), 'ریسک=' + txt('mRisk')
+        ].join(' · ');
+        var activeMode = document.querySelector('[data-mentor-mode].active');
+        return {
+          symbol: val('symbol'),
+          interval: val('interval'),
+          indicators: inds,
+          decision: decision,
+          mentor_mode: activeMode ? activeMode.getAttribute('data-mentor-mode') : 'advisor'
+        };
+      }
+
+      function setStatus(kind, text) {
+        status.className = 'tc-status' + (kind ? ' ' + kind : '');
+        status.innerHTML = '<span></span>' + text;
+      }
+
+      function open(seed) {
+        panel.classList.add('open');
+        if (!greeted) {
+          greeted = true;
+          add('bot', 'سلام، من استاد کاوش هستم؛ هم برای آموزش معامله‌گری کنار شما هستم و هم تحلیل همین صفحه و مدیریت ریسک معامله‌تان را بررسی می‌کنم. از گزینه‌های پیشنهادی استفاده کنید یا سؤال خودتان را بنویسید.');
+        }
+        if (seed) add('bot', seed);
+        input.focus();
+      }
+      window.tradeaiOpenChat = open;
+
+      fab.addEventListener('click', function () { panel.classList.toggle('open'); if (panel.classList.contains('open')) open(); });
+      document.getElementById('tradeChatClose').addEventListener('click', function () { panel.classList.remove('open'); });
+      suggestions.addEventListener('click', function (e) {
+        var button = e.target.closest('[data-question]');
+        if (!button || sending) return;
+        input.value = button.getAttribute('data-question');
+        form.requestSubmit();
+      });
+
+      form.addEventListener('submit', async function (e) {
+        e.preventDefault();
+        var text = input.value.trim(); if (!text || sending) return;
+        sending = true;
+        form.querySelector('button[type="submit"]').disabled = true;
+        add('user', text); history.push({ role: 'user', content: text }); input.value = '';
+        var t = add('bot', 'در حال نوشتن…'); t.classList.add('typing');
+        setStatus('busy', 'در حال فکر کردن…');
+        try {
+          var res = await fetch('assistant-chat', {
+            method: 'POST', headers: {
+              'Content-Type': 'application/json',
+              'X-CSRF-Token': document.querySelector('meta[name="csrf-token"]').content
+            },
+            body: JSON.stringify({ messages: history, context: pageContext() })
+          });
+          var data = await res.json().catch(function () { return {}; });
+          t.remove();
+          if (!res.ok || !data.ok || !data.reply) {
+            throw new Error((data && data.message) || 'پاسخی از سرویس دریافت نشد.');
+          }
+          var reply = data.reply;
+          add('bot', reply); history.push({ role: 'assistant', content: reply });
+          setStatus('', 'آمادهٔ پاسخ‌گویی');
+        } catch (err) {
+          t.remove();
+          add('bot', (err && err.message) || 'ارتباط برقرار نشد؛ لطفاً دوباره تلاش کنید.');
+          setStatus('error', 'اختلال موقت در ارتباط');
+        } finally {
+          sending = false;
+          form.querySelector('button[type="submit"]').disabled = false;
+          input.focus();
+        }
+      });
+    })();
+  </script>
+
+  <script src="{{ url_for('static', filename='dashboard.js') }}?v=20260809-4"></script>
+</body>
+</html>
