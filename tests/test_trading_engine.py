@@ -8,7 +8,7 @@ PROJECT_DIR = Path(__file__).resolve().parents[1]
 if str(PROJECT_DIR) not in sys.path:
     sys.path.insert(0, str(PROJECT_DIR))
 
-from trading_engine import SignalSettings, TradingRuleError, build_risk_plan, generate_signal
+from trading_engine import SignalSettings, TradingRuleError, build_risk_plan, capital_feasibility, generate_signal
 
 
 def summary():
@@ -41,6 +41,16 @@ def market():
 
 
 class TradingEngineTests(unittest.TestCase):
+    def test_capital_feasibility_rejects_broker_minimum_above_budget(self):
+        result = capital_feasibility(
+            {"latest_atr": 42.0},
+            {"point": 0.01, "digits": 2, "trade_tick_size": 0.01,
+             "trade_tick_value": 0.1, "volume_min": 0.01, "trade_stops_level": 0},
+            equity=100, risk_percent=0.1, atr_stop_multiple=1.0,
+        )
+        self.assertFalse(result["feasible"])
+        self.assertGreater(result["minimum_equity_for_profile"], 4_000)
+
     def test_signal_requires_every_filter(self):
         settings = SignalSettings()
         accepted = generate_signal(
@@ -69,6 +79,35 @@ class TradingEngineTests(unittest.TestCase):
         self.assertEqual(signal["signal"], "HOLD")
         self.assertFalse(signal["filters"]["not_duplicate"])
 
+    def test_unprotected_or_excess_aggregate_risk_blocks_new_signal(self):
+        blocked = generate_signal(
+            summary(), market(), {"safe_for_signal": True},
+            symbol="EURUSD", interval="15min", candle_time="2026-08-09T10:00:00+00:00",
+            settings=SignalSettings(maximum_open_positions=3),
+            account_status={"connected": True, "terminal_trade_allowed": True,
+                            "account": {"trade_allowed": True, "expert_allowed": True, "equity": 10_000}},
+            portfolio={"open_position_count": 1, "unprotected_position_count": 1,
+                       "aggregate_open_risk": 150},
+        )
+        self.assertEqual(blocked["signal"], "HOLD")
+        self.assertFalse(blocked["filters"]["all_open_positions_protected"])
+        self.assertFalse(blocked["filters"]["aggregate_open_risk_limit"])
+
+    def test_symbol_level_limits_block_only_that_market(self):
+        blocked = generate_signal(
+            summary(), market(), {"safe_for_signal": True},
+            symbol="EUR/USD", interval="4h", candle_time="2026-08-09T08:00:00+00:00",
+            settings=SignalSettings(maximum_open_positions=4),
+            portfolio={
+                "open_position_count": 1,
+                "open_position_count_by_symbol": {"EURUSD": 1},
+                "daily_trade_count_by_symbol": {"EURUSD": 1},
+            },
+        )
+        self.assertEqual(blocked["signal"], "HOLD")
+        self.assertFalse(blocked["filters"]["symbol_position_limit"])
+        self.assertFalse(blocked["filters"]["symbol_daily_trade_limit"])
+
     def test_risk_plan_uses_equity_and_floors_volume(self):
         plan = build_risk_plan(
             "BUY", summary(), market(), {"equity": 10_000, "currency": "USD"}, SignalSettings()
@@ -81,6 +120,11 @@ class TradingEngineTests(unittest.TestCase):
     def test_risk_above_two_percent_is_rejected(self):
         with self.assertRaises(TradingRuleError):
             SignalSettings(risk_percent=3).validated()
+
+    def test_demo_daily_limit_allows_twenty_but_not_more(self):
+        self.assertEqual(SignalSettings(maximum_daily_trades=20).validated().maximum_daily_trades, 20)
+        with self.assertRaises(TradingRuleError):
+            SignalSettings(maximum_daily_trades=21).validated()
 
     def test_ai_and_live_safety_gates_fail_closed(self):
         settings = SignalSettings(require_ai_confirmation=True, minimum_strength=70)

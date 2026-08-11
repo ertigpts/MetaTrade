@@ -119,7 +119,7 @@ const translations = {
     "backtest.connection": "Could not connect to the backtest service.",
     "backtest.warning": "Historical performance does not guarantee future results.",
     "backtest.noTrades": "No historical setup matched the selected rule.",
-    "history.title": "Analysis history",
+    "history.title": "Analysis and automated decisions",
     "history.refresh": "Refresh",
     "journal.title": "Trading journal",
     "journal.save": "Save entry",
@@ -281,7 +281,7 @@ const translations = {
     "backtest.connection": "ارتباط با سرویس بک‌تست برقرار نشد.",
     "backtest.warning": "عملکرد گذشته تضمینی برای نتیجه آینده نیست.",
     "backtest.noTrades": "هیچ موقعیت تاریخی با قانون انتخاب‌شده منطبق نبود.",
-    "history.title": "تاریخچه تحلیل",
+    "history.title": "تاریخچه تحلیل و تصمیم‌های خودکار",
     "history.refresh": "به‌روزرسانی",
     "journal.title": "ژورنال معاملات",
     "journal.save": "ذخیره معامله",
@@ -432,6 +432,13 @@ let latestSetupExplanation = "";
 let currentMentorMode = "education";
 let latestMarketData = { opens: null, highs: null, lows: null, labels: null, market: null, quality: null };
 let pendingExecutionToken = null;
+let pendingExecutionPlan = null;
+let observedCandleStartMs = null;
+let autoCandleCyclePending = false;
+let mt5ServerClockOffsetMs = 0;
+let observedDemoHourSlotMs = null;
+let currentDemoHourSlot = null;
+let currentDemoHourVolume = 0.01;
 const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content || "";
 let currentLanguage = localStorage.getItem("tradeaiLanguage") || "fa";
 if (!translations[currentLanguage]) {
@@ -439,42 +446,6 @@ if (!translations[currentLanguage]) {
 }
 
 const strategyPresets = {
-  scalp: {
-    interval: "15min",
-    outputsize: 120,
-    rsi: 9,
-    macdShort: 8,
-    macdLong: 21,
-    macdSignal: 5,
-    holding: 20,
-    holdingBars: 3,
-    feeBps: 2,
-    aiProfile: "scalp",
-  },
-  day: {
-    interval: "1h",
-    outputsize: 150,
-    rsi: 14,
-    macdShort: 12,
-    macdLong: 26,
-    macdSignal: 9,
-    holding: 240,
-    holdingBars: 6,
-    feeBps: 2,
-    aiProfile: "day",
-  },
-  swing: {
-    interval: "4h",
-    outputsize: 220,
-    rsi: 21,
-    macdShort: 19,
-    macdLong: 39,
-    macdSignal: 9,
-    holding: 1440,
-    holdingBars: 12,
-    feeBps: 2,
-    aiProfile: "swing",
-  },
   goldDemo: {
     symbol: "XAU/USD",
     interval: "4h",
@@ -484,14 +455,73 @@ const strategyPresets = {
     macdLong: 21,
     macdSignal: 5,
     holding: 1440,
-    holdingBars: 6,
+    holdingBars: 12,
     feeBps: 2,
     aiProfile: "swing",
-    atrStopMultiple: 1.0,
+    atrStopMultiple: 2.0,
+    rewardRisk: 2.0,
+    riskPercent: 0.1,
+    minimumStrength: 70,
+    maximumSpreadBps: 3,
+    maximumVolume: 0.1,
+    maximumDailyLoss: 1,
+    maximumDailyTrades: 20,
+    minimumAiConfidence: 70,
+  },
+  goldM15Demo: {
+    symbol: "XAU/USD",
+    interval: "15min",
+    outputsize: 500,
+    rsi: 14,
+    macdShort: 12,
+    macdLong: 26,
+    macdSignal: 9,
+    holding: 90,
+    holdingBars: 6,
+    feeBps: 2,
+    aiProfile: "day",
+    atrStopMultiple: 1.5,
     rewardRisk: 2.5,
     riskPercent: 0.1,
+    minimumStrength: 80,
+    maximumSpreadBps: 3,
+    maximumVolume: 0.01,
+    maximumDailyLoss: 0.25,
+    maximumDailyTrades: 20,
+    minimumAiConfidence: 80,
+  },
+  eurDemo: {
+    symbol: "EUR/USD", interval: "4h", outputsize: 500,
+    rsi: 21, macdShort: 12, macdLong: 26, macdSignal: 9,
+    holding: 1440, holdingBars: 6, feeBps: 2, aiProfile: "swing",
+    atrStopMultiple: 1.5, rewardRisk: 1.0, riskPercent: 0.1,
+    minimumStrength: 75, maximumSpreadBps: 3, maximumVolume: 0.01,
+    maximumDailyLoss: 0.5, maximumDailyTrades: 20, minimumAiConfidence: 75,
+  },
+  gbpDemo: {
+    symbol: "GBP/USD", interval: "4h", outputsize: 500,
+    rsi: 21, macdShort: 12, macdLong: 26, macdSignal: 9,
+    holding: 720, holdingBars: 3, feeBps: 2, aiProfile: "swing",
+    atrStopMultiple: 1.5, rewardRisk: 1.5, riskPercent: 0.1,
+    minimumStrength: 75, maximumSpreadBps: 3, maximumVolume: 0.01,
+    maximumDailyLoss: 0.5, maximumDailyTrades: 20, minimumAiConfidence: 75,
+  },
+  jpyDemo: {
+    symbol: "USD/JPY", interval: "4h", outputsize: 500,
+    rsi: 21, macdShort: 12, macdLong: 26, macdSignal: 9,
+    holding: 2880, holdingBars: 12, feeBps: 2, aiProfile: "swing",
+    atrStopMultiple: 1.5, rewardRisk: 2.5, riskPercent: 0.1,
+    minimumStrength: 75, maximumSpreadBps: 3, maximumVolume: 0.01,
+    maximumDailyLoss: 0.5, maximumDailyTrades: 20, minimumAiConfidence: 75,
   },
 };
+
+// Strategy selection belongs before execution controls: choose first, then analyze.
+const strategyPresetPanel = document.getElementById("strategyPresetPanel");
+const mt5ExecutionCard = document.getElementById("mt5Card");
+if (strategyPresetPanel && mt5ExecutionCard) {
+  mt5ExecutionCard.parentNode?.insertBefore(strategyPresetPanel, mt5ExecutionCard);
+}
 
 function t(key) {
   return (
@@ -591,6 +621,8 @@ const mt5Card = document.getElementById("mt5Card");
 const mt5ConnectBtn = document.getElementById("mt5ConnectBtn");
 const mt5FetchBtn = document.getElementById("mt5FetchBtn");
 const mt5SignalBtn = document.getElementById("mt5SignalBtn");
+const quickDemoAnalyzeBtn = document.getElementById("quickDemoAnalyzeBtn");
+const expensiveAiReviewBtn = document.getElementById("expensiveAiReviewBtn");
 
 function parsePrices(text) {
   return text
@@ -672,6 +704,8 @@ async function checkMt5Connection() {
   try {
     const { response, data } = await apiFetch("mt5/status");
     if (!response.ok || !data.ok) throw new Error(data.error || "MT5 connection failed.");
+    const serverEpoch = Number(data.server_clock?.epoch_seconds || 0);
+    if (serverEpoch > 0) mt5ServerClockOffsetMs = (serverEpoch * 1000) - Date.now();
     renderMt5Status(data);
   } catch (error) {
     setMt5ConnectionState(false, t("mt5.disconnected"));
@@ -742,12 +776,30 @@ function renderMt5Signal(payload) {
   if (!box) return;
   const signal = payload.signal || {};
   const plan = payload.risk_plan;
-  const tone = String(signal.signal || "HOLD").toLowerCase();
+  const displaySignal = signal.display_signal || signal.signal || "HOLD";
+  const tone = String(displaySignal).toLowerCase().replace(/\s+/g, "-");
   const reasons = Array.isArray(signal.reasons) ? signal.reasons : [];
   const ai = payload.ai_assessment || {};
+  const aiReasons = Array.isArray(ai.reasons) ? ai.reasons : [];
+  const aiInvalidators = Array.isArray(ai.invalidators) ? ai.invalidators : [];
   const mtf = payload.timeframe_confirmation || {};
   const macro = payload.macro_gate || {};
   const market = payload.market || {};
+  const intelligence = payload.market_intelligence || {};
+  const regime = intelligence.regime || {};
+  const drift = intelligence.drift || {};
+  const route = intelligence.strategy_route || {};
+  const demoLab = payload.execution_tier === "demo_lab";
+  const experimental = payload.execution_tier === "experimental_forward_demo";
+  const tierHtml = demoLab
+    ? `<p class="mt5-safety">${currentLanguage === "fa"
+      ? "آزمایشگاه DEMO: خروجی فقط BUY یا SELL است و خبر، AI و چندتایم‌فریم آن را متوقف نمی‌کنند. این آزمایش است و وعده سود نیست."
+      : "DEMO LAB: output is BUY or SELL only; news, AI, and multi-timeframe checks do not veto it. This is an experiment, not a profit promise."}</p>`
+    : experimental
+    ? `<p class="mt5-safety">${currentLanguage === "fa"
+      ? "هشدار: این پروفایل بک‌تست قبولی ندارد و فقط برای جمع‌آوری داده Forward روی حساب دمو فعال است."
+      : "Warning: this profile did not pass backtesting and is enabled only for forward data collection on DEMO."}</p>`
+    : "";
   const planHtml = plan ? `
     <div class="ai-trade-grid">
       <section class="ai-trade-card"><span>${currentLanguage === "fa" ? "ورود" : "Entry"}</span><strong>${escapeHtml(plan.entry)}</strong></section>
@@ -757,55 +809,88 @@ function renderMt5Signal(payload) {
       <section class="ai-trade-card"><span>${currentLanguage === "fa" ? "ریسک تخمینی" : "Estimated risk"}</span><strong>${escapeHtml(plan.estimated_risk_amount)} ${escapeHtml(plan.currency)}</strong></section>
       <section class="ai-trade-card"><span>${currentLanguage === "fa" ? "ریسک مؤثر" : "Effective risk"}</span><strong>${escapeHtml(plan.risk_percent_effective)}%</strong></section>
     </div>` : "";
+  const aiReviewHtml = payload.deep_ai_review ? `
+    <section class="ai-review-summary">
+      <strong>نظر دوم AI · ${escapeHtml(ai.decision || "uncertain")} · ${escapeHtml(ai.confidence ?? 0)}/100</strong>
+      <small>مدل: ${escapeHtml(ai.model || "-")} · وضعیت بازار: ${escapeHtml(ai.regime || "-")} · ریسک خبر: ${escapeHtml(ai.news_risk || "unknown")}</small>
+      ${aiReasons.length ? `<ul>${aiReasons.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : ""}
+      ${aiInvalidators.length ? `<p class="muted">موارد مخالف: ${aiInvalidators.map(escapeHtml).join(" · ")}</p>` : ""}
+    </section>` : "";
   box.className = `mt5-signal-result signal-${tone}`;
   box.innerHTML = `
-    <h3>${escapeHtml(signal.signal || "HOLD")} · ${escapeHtml(signal.symbol || "-")}</h3>
+    <h3>${escapeHtml(displaySignal)} · ${escapeHtml(signal.symbol || "-")}</h3>
     <p>${currentLanguage === "fa" ? "قدرت اندیکاتور / ترکیبی" : "Indicator / combined strength"}: ${escapeHtml(signal.indicator_strength ?? "-")}/${escapeHtml(signal.combined_strength ?? "-")} · ${escapeHtml(signal.candle_time || "-")}</p>
     <div class="ai-trade-grid">
       <section class="ai-trade-card"><span>AI</span><strong>${escapeHtml(ai.decision || "-")} · ${escapeHtml(ai.confidence ?? 0)}/100</strong></section>
+      <section class="ai-trade-card"><span>Regime</span><strong>${escapeHtml(regime.regime || "-")} · ${escapeHtml(regime.confidence ?? 0)}/100</strong></section>
+      <section class="ai-trade-card"><span>Drift</span><strong>${escapeHtml(drift.level || "-")}</strong></section>
+      <section class="ai-trade-card"><span>Router</span><strong>${escapeHtml(route.recommended_interval || "HOLD")} · ${escapeHtml(route.decision || "-")}</strong></section>
       <section class="ai-trade-card"><span>H1/H4/D1</span><strong>${escapeHtml(mtf.aligned ? "تأیید" : "رد")} · ${escapeHtml(mtf.score ?? 0)}/100</strong></section>
-      <section class="ai-trade-card"><span>خبر</span><strong>${escapeHtml(macro.clear ? "شفاف" : "مسدود")}</strong></section>
+      <section class="ai-trade-card"><span>خبر</span><strong>${escapeHtml(demoLab ? "اطلاعاتی؛ بدون وتو" : (macro.clear ? "شفاف" : "مسدود"))}</strong></section>
       <section class="ai-trade-card"><span>تازگی قیمت</span><strong>${escapeHtml(market.tick_age_seconds ?? "-")} ثانیه</strong></section>
     </div>
     ${planHtml}
+    ${aiReviewHtml}
+    ${tierHtml}
     <ul>${reasons.map((reason) => `<li>${escapeHtml(reason)}</li>`).join("")}</ul>
     <p class="mt5-safety">${currentLanguage === "fa" ? "این خروجی احتمال سود نیست و هیچ سفارشی ارسال نشده است." : "This is not a profit probability and no order was sent."}</p>
   `;
   box.classList.remove("hidden");
   pendingExecutionToken = payload.execution_ready ? payload.execution_token : null;
+  pendingExecutionPlan = pendingExecutionToken && plan ? { ...plan, direction: displaySignal } : null;
   const executionPanel = document.getElementById("demoExecutionPanel");
   const executionStatus = document.getElementById("demoExecutionStatus");
   const confirmation = document.getElementById("demoConfirmation");
   if (executionPanel) executionPanel.classList.toggle("hidden", !pendingExecutionToken);
   if (executionStatus) executionStatus.textContent = pendingExecutionToken ? "پلن توسط کارگزاری بررسی شد؛ ۵ دقیقه برای تأیید فرصت دارید." : "";
   if (confirmation) confirmation.value = "";
+  const quickFields = {
+    quickDirection: displaySignal,
+    quickEntry: plan?.entry ?? "",
+    quickVolume: plan?.volume ?? "",
+    quickStopLoss: plan?.stop_loss ?? "",
+    quickTakeProfit: plan?.take_profit ?? "",
+  };
+  Object.entries(quickFields).forEach(([id, value]) => {
+    const input = document.getElementById(id);
+    if (input) input.value = value;
+  });
 }
 
-async function buildMt5SignalPreview() {
+async function buildMt5SignalPreview(options = {}) {
   if (!mt5SignalBtn) return;
   mt5SignalBtn.disabled = true;
   hideError();
   try {
     const requestPayload = {
-      symbol: document.getElementById("symbol")?.value || "EUR/USD",
-      interval: document.getElementById("interval")?.value || "15min",
+      symbol: options?.quick === true ? "XAUUSD" : (document.getElementById("symbol")?.value || "EUR/USD"),
+      interval: options?.quick === true ? "4h" : (document.getElementById("interval")?.value || "15min"),
       outputsize: Number(document.getElementById("outputsize")?.value || 300),
       minimum_strength: Number(document.getElementById("mt5MinStrength")?.value || 65),
       maximum_spread_bps: Number(document.getElementById("mt5MaxSpread")?.value || 3),
-      risk_percent: Number(document.getElementById("mt5RiskPercent")?.value || 0.5),
+      risk_percent: Number(document.getElementById("mt5RiskPercent")?.value || 0.1),
       maximum_volume: Number(document.getElementById("mt5MaxVolume")?.value || 0.1),
       atr_stop_multiple: Number(document.getElementById("mt5AtrStop")?.value || 1.5),
       reward_risk: Number(document.getElementById("mt5RewardRisk")?.value || 2.5),
       maximum_daily_loss_percent: Number(document.getElementById("mt5DailyLoss")?.value || 1),
-      maximum_open_positions: 1,
+      maximum_open_positions: 4,
       maximum_consecutive_losses: Number(document.getElementById("mt5LossStreak")?.value || 2),
       loss_cooldown_hours: Number(document.getElementById("mt5LossCooldown")?.value || 12),
-      maximum_daily_trades: Number(document.getElementById("mt5DailyTradesLimit")?.value || 3),
+      maximum_daily_trades: Number(document.getElementById("mt5DailyTradesLimit")?.value || 20),
       ai_minimum_confidence: Number(document.getElementById("mt5AiConfidence")?.value || 70),
       rsi_period: Number(document.getElementById("rsiPeriod")?.value || 14),
       macd_short_period: Number(document.getElementById("macdShort")?.value || 12),
       macd_long_period: Number(document.getElementById("macdLong")?.value || 26),
       macd_signal_period: Number(document.getElementById("macdSignal")?.value || 9),
+      demo_lab_mode: options?.quick === true || Boolean(document.getElementById("demoLabMode")?.checked),
+      demo_lab_slot: options?.quick === true ? `quick-${Date.now()}` : (options?.demoLabSlot || null),
+      demo_lab_volume: options?.quick === true
+        ? Number(options?.defaultVolume ?? currentDemoHourVolume)
+        : (options?.demoLabVolume || 0.01),
+      disable_ai: options?.noAi === true,
+      primary_ai_review: options?.primaryReview === true,
+      deep_ai_review: options?.expensiveReview === true,
+      analysis_only: options?.analysisOnly === true,
     };
     const { response, data } = await apiFetch("mt5/signal-preview", {
       method: "POST",
@@ -827,19 +912,22 @@ async function buildMt5SignalPreview() {
     if (marketText) {
       marketText.textContent = `${market.symbol || "-"} · Bid ${market.bid ?? "-"} · Ask ${market.ask ?? "-"} · Spread ${market.spread_pips ?? "-"} pip`;
     }
+    return data;
   } catch (error) {
     showError(error?.message || "Signal preview failed.");
+    return null;
   } finally {
     mt5SignalBtn.disabled = false;
   }
 }
 
-async function executeDemoOrder() {
+async function executeDemoOrder(options = {}) {
   const button = document.getElementById("demoExecuteBtn");
   const confirmation = document.getElementById("demoConfirmation");
   const status = document.getElementById("demoExecutionStatus");
   if (!button || !pendingExecutionToken) return;
-  if ((confirmation?.value || "").trim().toUpperCase() !== "DEMO") {
+  const automatic = options?.automatic === true;
+  if (!automatic && (confirmation?.value || "").trim().toUpperCase() !== "DEMO") {
     if (status) status.textContent = "برای تأیید، عبارت DEMO را دقیق وارد کنید.";
     return;
   }
@@ -849,22 +937,39 @@ async function executeDemoOrder() {
     const { response, data } = await apiFetch("mt5/execute-demo", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ execution_token: pendingExecutionToken, confirmation: "DEMO" }),
+      body: JSON.stringify({
+        execution_token: pendingExecutionToken,
+        confirmation: "DEMO",
+        plan_overrides: automatic ? null : {
+          volume: Number(document.getElementById("quickVolume")?.value),
+          stop_loss: Number(document.getElementById("quickStopLoss")?.value),
+          take_profit: Number(document.getElementById("quickTakeProfit")?.value),
+        },
+      }),
     });
     if (!response.ok || !data.ok) throw new Error(data.error || "Demo order failed.");
     pendingExecutionToken = null;
+    pendingExecutionPlan = null;
     document.getElementById("demoExecutionPanel")?.classList.add("hidden");
     const result = data.result || {};
     if (status) status.textContent = `سفارش دمو ثبت شد: order ${result.order || "-"} · deal ${result.deal || "-"}`;
     const box = document.getElementById("mt5SignalResult");
     if (box) box.insertAdjacentHTML("beforeend", `<p class="success">سفارش DEMO ارسال شد · Order ${escapeHtml(result.order || "-")} · Deal ${escapeHtml(result.deal || "-")}</p>`);
+    if (automatic) setAutoCandleStatus(`سفارش DEMO ارسال شد · Order ${result.order || "-"} · Deal ${result.deal || "-"}`);
     loadJournal();
     checkMt5Connection();
   } catch (error) {
     pendingExecutionToken = null;
-    document.getElementById("demoExecutionPanel")?.classList.add("hidden");
-    showError(error?.message || "Demo order failed.");
-    if (status) status.textContent = error?.message || "نتیجه سفارش نامشخص است؛ MT5 را بررسی کنید.";
+    pendingExecutionPlan = null;
+    const message = error?.message || "نتیجه سفارش نامشخص است؛ MT5 را بررسی کنید.";
+    // Keep the confirmation panel visible: previously it was hidden before
+    // writing the error, so the user only heard the alert sound.
+    document.getElementById("demoExecutionPanel")?.classList.remove("hidden");
+    showError(message);
+    if (status) status.textContent = `${message} برای تلاش دوباره، تحلیل تازه بگیرید.`;
+    const box = document.getElementById("mt5SignalResult");
+    if (box) box.insertAdjacentHTML("beforeend", `<p class="error">${escapeHtml(message)} برای تلاش دوباره، تحلیل تازه بگیرید.</p>`);
+    if (automatic) setAutoCandleStatus(error?.message || "ارسال خودکار سفارش DEMO ناموفق بود.");
   } finally {
     button.disabled = false;
   }
@@ -1144,6 +1249,12 @@ function applyStrategyPreset(name) {
     mt5AtrStop: preset.atrStopMultiple,
     mt5RewardRisk: preset.rewardRisk,
     mt5RiskPercent: preset.riskPercent,
+    mt5MinStrength: preset.minimumStrength,
+    mt5MaxSpread: preset.maximumSpreadBps,
+    mt5MaxVolume: preset.maximumVolume,
+    mt5DailyLoss: preset.maximumDailyLoss,
+    mt5DailyTradesLimit: preset.maximumDailyTrades,
+    mt5AiConfidence: preset.minimumAiConfidence,
   };
 
   Object.entries(fields).forEach(([id, value]) => {
@@ -1152,6 +1263,126 @@ function applyStrategyPreset(name) {
       element.value = value;
     }
   });
+  observedCandleStartMs = null;
+  updateCandleClock();
+}
+
+function updateCandleClock() {
+  const remainingEl = document.getElementById("candleClockRemaining");
+  const timeframeEl = document.getElementById("candleClockTimeframe");
+  const closeEl = document.getElementById("candleClockClose");
+  const progressEl = document.getElementById("candleClockProgress");
+  const phaseEl = document.getElementById("candleClockPhase");
+  const labelEl = document.getElementById("candleClockLabel");
+  if (!remainingEl || !timeframeEl || !closeEl || !progressEl || !phaseEl || !labelEl) return;
+
+  const interval = document.getElementById("interval")?.value || "4h";
+  const minutesByInterval = {
+    "1min": 1, "5min": 5, "15min": 15, "30min": 30,
+    "1h": 60, "4h": 240, "1day": 1440,
+  };
+  const durationMs = (minutesByInterval[interval] || 240) * 60 * 1000;
+  const browserNow = Date.now();
+  const now = browserNow + mt5ServerClockOffsetMs;
+  const candleStart = Math.floor(now / durationMs) * durationMs;
+  const candleClose = candleStart + durationMs;
+  const remainingSeconds = Math.max(0, Math.ceil((candleClose - now) / 1000));
+  const hours = Math.floor(remainingSeconds / 3600);
+  const minutes = Math.floor((remainingSeconds % 3600) / 60);
+  const seconds = remainingSeconds % 60;
+  const elapsedRatio = Math.min(1, Math.max(0, (now - candleStart) / durationMs));
+  const hourMs = 60 * 60 * 1000;
+  const demoHourSlotStart = Math.floor(now / hourMs) * hourMs;
+  const demoHourIndex = Math.min(3, Math.max(0, Math.floor((now - candleStart) / hourMs)));
+  currentDemoHourSlot = String(Math.floor(demoHourSlotStart / hourMs));
+  currentDemoHourVolume = [0.01, 0.02, 0.03, 0.04][demoHourIndex] || 0.01;
+  const phase = elapsedRatio < 0.25 ? "start" : (elapsedRatio < 0.75 ? "middle" : "end");
+  const names = {
+    "1min": "M1", "5min": "M5", "15min": "M15", "30min": "M30",
+    "1h": "H1", "4h": "H4", "1day": "D1",
+  };
+  const phaseText = currentLanguage === "fa"
+    ? { start: "ابتدای کندل", middle: "میانه کندل", end: "انتهای کندل" }[phase]
+    : { start: "Early candle", middle: "Middle of candle", end: "Late candle" }[phase];
+  const locale = currentLanguage === "fa" ? "fa-IR" : "en-US";
+
+  timeframeEl.textContent = names[interval] || interval.toUpperCase();
+  labelEl.textContent = currentLanguage === "fa"
+    ? "زمان باقی‌مانده تا بسته‌شدن کندل"
+    : "Time until candle close";
+  remainingEl.textContent = [hours, minutes, seconds]
+    .map(value => String(value).padStart(2, "0")).join(":");
+  const localCandleClose = candleClose - mt5ServerClockOffsetMs;
+  closeEl.textContent = `${currentLanguage === "fa" ? "بسته‌شدن:" : "Closes:"} ${new Date(localCandleClose).toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" })}`;
+  progressEl.style.width = `${(elapsedRatio * 100).toFixed(2)}%`;
+  const hourlyLabSuffix = document.getElementById("demoLabMode")?.checked && interval === "4h"
+    ? (currentLanguage === "fa" ? ` · حجم این ساعت ${currentDemoHourVolume.toFixed(2)} لات` : ` · this hour ${currentDemoHourVolume.toFixed(2)} lot`)
+    : "";
+  phaseEl.textContent = `${phaseText} · ${Math.round(elapsedRatio * 100).toLocaleString(locale)}% ${currentLanguage === "fa" ? "سپری شده" : "elapsed"}${hourlyLabSuffix}`;
+
+  if (observedCandleStartMs == null) {
+    observedCandleStartMs = candleStart;
+  } else if (candleStart > observedCandleStartMs) {
+    observedCandleStartMs = candleStart;
+    if (!document.getElementById("demoLabMode")?.checked && document.getElementById("autoCandleAnalysis")?.checked && !autoCandleCyclePending) {
+      autoCandleCyclePending = true;
+      setAutoCandleStatus(currentLanguage === "fa"
+        ? "کندل بسته شد؛ چند ثانیه تا دریافت داده بسته‌شده جدید…"
+        : "Candle closed; waiting briefly for the new closed bar…");
+      setTimeout(runAutoCandleCycle, 7000);
+    }
+  }
+  if (observedDemoHourSlotMs == null) {
+    observedDemoHourSlotMs = demoHourSlotStart;
+  } else if (demoHourSlotStart > observedDemoHourSlotMs) {
+    observedDemoHourSlotMs = demoHourSlotStart;
+    const hourlyGoldLab = interval === "4h" && document.getElementById("demoLabMode")?.checked;
+    if (hourlyGoldLab && document.getElementById("autoCandleAnalysis")?.checked && !autoCandleCyclePending) {
+      autoCandleCyclePending = true;
+      setAutoCandleStatus(currentLanguage === "fa"
+        ? `اسلات ساعتی جدید؛ آماده تحلیل H4 با حجم ${currentDemoHourVolume.toFixed(2)} لات…`
+        : `New hourly slot; preparing H4 analysis at ${currentDemoHourVolume.toFixed(2)} lot…`);
+      setTimeout(runAutoCandleCycle, 7000);
+    }
+  }
+}
+
+function setAutoCandleStatus(message) {
+  const status = document.getElementById("autoCandleStatus");
+  if (status) status.textContent = message;
+}
+
+async function runAutoCandleCycle() {
+  try {
+    if (!document.getElementById("autoCandleAnalysis")?.checked) return;
+    setAutoCandleStatus(currentLanguage === "fa"
+      ? "در حال تحلیل خودکار کندل بسته‌شده…"
+      : "Analyzing the newly closed candle…");
+    const payload = await buildMt5SignalPreview({
+      automatic: true,
+      demoLabSlot: currentDemoHourSlot,
+      demoLabVolume: currentDemoHourVolume,
+    });
+    if (!payload) {
+      setAutoCandleStatus(currentLanguage === "fa"
+        ? "تحلیل خودکار ناموفق بود؛ در بسته‌شدن کندل بعدی دوباره تلاش می‌شود."
+        : "Automatic analysis failed; it will retry after the next candle.");
+      return;
+    }
+    if (payload.execution_ready && document.getElementById("autoDemoExecution")?.checked) {
+      setAutoCandleStatus(currentLanguage === "fa"
+        ? "همه فیلترها پاس شدند؛ در حال ارسال سفارش محافظت‌شده DEMO…"
+        : "All gates passed; sending the protected DEMO order…");
+      await executeDemoOrder({ automatic: true });
+      return;
+    }
+    const signal = payload.signal?.display_signal || payload.signal?.signal || "HOLD";
+    setAutoCandleStatus(currentLanguage === "fa"
+      ? `تحلیل انجام شد: ${signal}؛ سفارشی ارسال نشد.`
+      : `Analysis completed: ${signal}; no order was sent.`);
+  } finally {
+    autoCandleCyclePending = false;
+  }
 }
 
 function updateMarketSession() {
@@ -1541,13 +1772,35 @@ async function loadHistory() {
     const { response, data } = await apiFetch("history");
     if (!response.ok) throw new Error(data.error || "History failed");
     const items = Array.isArray(data.items) ? data.items : [];
-    list.innerHTML = items.length
-      ? items.map((item) => `
+    const automated = Array.isArray(data.automated_signals) ? data.automated_signals : [];
+    const automatedHtml = automated.map((item) => {
+      const details = item.details || {};
+      const plan = details.risk_plan || {};
+      const reasons = Array.isArray(details.reasons) ? details.reasons : [];
+      const outcome = item.trade_status || "open";
+      const realized = item.realized_net == null ? "-" : `${Number(item.realized_net).toFixed(2)} USD`;
+      return `
+        <article class="record-row automated-record">
+          <strong>${escapeHtml(item.signal)} · ${escapeHtml(item.symbol)} · ${escapeHtml(item.interval)}</strong>
+          <span>${currentLanguage === "fa" ? "معامله" : "Trade"}: ${escapeHtml(outcome)} · P/L ${escapeHtml(realized)}</span>
+          <small>
+            Entry: ${escapeHtml(item.entry_price ?? plan.entry ?? "-")} ·
+            SL: ${escapeHtml(item.stop_loss ?? plan.stop_loss ?? "-")} ·
+            TP: ${escapeHtml(item.take_profit ?? plan.take_profit ?? "-")} ·
+            Order: ${escapeHtml(item.order_ticket ?? "-")}
+          </small>
+          ${reasons.length ? `<small>${reasons.map(escapeHtml).join(" · ")}</small>` : ""}
+          <small>${escapeHtml(new Date(item.created_at).toLocaleString())}</small>
+        </article>`;
+    }).join("");
+    const manualHtml = items.map((item) => `
           <article class="record-row">
             <strong>${escapeHtml(item.symbol)} · ${escapeHtml(item.interval)}</strong>
             <span>${escapeHtml(item.action_bias)} · ${escapeHtml(item.signal_strength)}/100</span>
             <small>${escapeHtml(new Date(item.created_at).toLocaleString())}</small>
-          </article>`).join("")
+          </article>`).join("");
+    list.innerHTML = automatedHtml || manualHtml
+      ? `${automatedHtml}${manualHtml}`
       : `<p class="muted">No saved analysis yet.</p>`;
   } catch {
     list.innerHTML = `<p class="error">Could not load analysis history.</p>`;
@@ -1629,6 +1882,63 @@ if (backtestBtn) {
 const refreshHistoryBtn = document.getElementById("refreshHistoryBtn");
 if (refreshHistoryBtn) refreshHistoryBtn.addEventListener("click", loadHistory);
 
+async function loadMultiAssetResearch() {
+  const box = document.getElementById("multiAssetResearch");
+  if (!box) return;
+  try {
+    const { response, data } = await apiFetch("research/multi-asset");
+    if (!response.ok || !data.ok) throw new Error(data.error || "Research report failed.");
+    const cards = [];
+    for (const [timeframe, report] of Object.entries(data.reports || {})) {
+      for (const item of report.markets || []) {
+        const test = item.test || {};
+        const status = item.qualified ? "QUALIFIED" : "RESEARCH ONLY";
+        cards.push(`<article class="record-item">
+          <strong>${escapeHtml(item.symbol || "-")} · ${escapeHtml(timeframe)} · ${escapeHtml(status)}</strong>
+          <small>${escapeHtml(item.strategy_family || "-")} · trades ${escapeHtml(test.trade_count ?? 0)} · win ${escapeHtml(test.win_rate ?? "-")}% · return ${escapeHtml(test.total_return_pct ?? "-")}% · PF ${escapeHtml(test.profit_factor ?? "-")}</small>
+        </article>`);
+      }
+    }
+    box.innerHTML = cards.join("") || `<p class="muted">No research report is available.</p>`;
+  } catch (error) {
+    box.innerHTML = `<p class="error">${escapeHtml(error?.message || "Could not load research results.")}</p>`;
+  }
+}
+
+document.getElementById("multiAssetRefreshBtn")?.addEventListener("click", loadMultiAssetResearch);
+loadMultiAssetResearch();
+
+async function runFastValidation() {
+  const button = document.getElementById("fastValidationBtn");
+  const box = document.getElementById("fastValidationResult");
+  if (!button || !box) return;
+  button.disabled = true;
+  box.innerHTML = `<p class="muted">در حال بازپخش پروفایل‌ها روی ۵۰۰۰ کندل بسته‌شده…</p>`;
+  try {
+    const { response, data } = await apiFetch("research/fast-validation", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ candles: 5000 }),
+    });
+    if (!response.ok || !data.ok) throw new Error(data.error || "اعتبارسنجی اجرا نشد.");
+    box.innerHTML = (data.profiles || []).map((item) => {
+      const test = item.test || {};
+      const stress = item.stress_test || {};
+      const status = item.fresh_validation_qualified ? "قبول" : "رد";
+      return `<article class="record-item">
+        <strong>${escapeHtml(item.symbol || "-")} · ${escapeHtml(item.interval || "-")} · ${status} · امتیاز ${escapeHtml(item.acceptance_score ?? 0)}/10</strong>
+        <small>${escapeHtml(item.strategy_family || "-")} · Test ${escapeHtml(test.total_return_pct ?? "-")}% / PF ${escapeHtml(test.profit_factor ?? "-")} · Stress ${escapeHtml(stress.total_return_pct ?? "-")}% / PF ${escapeHtml(stress.profit_factor ?? "-")}</small>
+      </article>`;
+    }).join("") || `<p class="muted">نتیجه‌ای تولید نشد.</p>`;
+  } catch (error) {
+    box.innerHTML = `<p class="error">${escapeHtml(error?.message || "اعتبارسنجی اجرا نشد.")}</p>`;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+document.getElementById("fastValidationBtn")?.addEventListener("click", runFastValidation);
+
 const journalForm = document.getElementById("journalForm");
 if (journalForm) {
   journalForm.addEventListener("submit", async (event) => {
@@ -1706,7 +2016,44 @@ if (mt5FetchBtn) {
 }
 
 if (mt5SignalBtn) {
-  mt5SignalBtn.addEventListener("click", buildMt5SignalPreview);
+  mt5SignalBtn.addEventListener("click", async () => {
+    mt5SignalBtn.textContent = "در حال تحلیل عددی بدون AI…";
+    const payload = await buildMt5SignalPreview({ quick: true, noAi: true, defaultVolume: 0.01 });
+    if (payload?.execution_ready) {
+      document.getElementById("demoExecutionPanel")?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+    mt5SignalBtn.textContent = "۱) تحلیل عددی استراتژی بدون AI — لات 0.01";
+  });
+}
+
+if (quickDemoAnalyzeBtn) {
+  quickDemoAnalyzeBtn.addEventListener("click", async () => {
+    quickDemoAnalyzeBtn.disabled = true;
+    quickDemoAnalyzeBtn.textContent = "در حال تحلیل اقتصادی با Gemini…";
+    const payload = await buildMt5SignalPreview({ quick: true, primaryReview: true, defaultVolume: 0.05 });
+    if (payload?.execution_ready) {
+      document.getElementById("demoExecutionPanel")?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+    quickDemoAnalyzeBtn.disabled = false;
+    quickDemoAnalyzeBtn.textContent = "۲) تحلیل با Gemini ارزان — لات 0.05";
+  });
+}
+
+if (expensiveAiReviewBtn) {
+  expensiveAiReviewBtn.addEventListener("click", async () => {
+    expensiveAiReviewBtn.disabled = true;
+    expensiveAiReviewBtn.textContent = "در حال داوری دستی با Qwen…";
+    const payload = await buildMt5SignalPreview({
+      quick: true,
+      expensiveReview: true,
+      defaultVolume: 0.08,
+    });
+    if (payload?.execution_ready) {
+      document.getElementById("demoExecutionPanel")?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+    expensiveAiReviewBtn.disabled = false;
+    expensiveAiReviewBtn.textContent = "۳) داوری دستی با Qwen گران — لات 0.08";
+  });
 }
 
 document.getElementById("demoExecuteBtn")?.addEventListener("click", executeDemoOrder);
@@ -1725,6 +2072,41 @@ document.querySelectorAll("input[name='strategyPreset']").forEach((input) => {
     }
   });
 });
+
+const autoCandleAnalysis = document.getElementById("autoCandleAnalysis");
+const autoDemoExecution = document.getElementById("autoDemoExecution");
+const demoLabMode = document.getElementById("demoLabMode");
+if (demoLabMode) {
+  // Experimental trading modes must always be deliberately re-armed.
+  demoLabMode.checked = false;
+  demoLabMode.addEventListener("change", () => {
+    observedDemoHourSlotMs = null;
+    setAutoCandleStatus(demoLabMode.checked
+      ? (currentLanguage === "fa" ? "آزمایشگاه DEMO فعال شد؛ در هر کندل H4 چهار BUY/SELL ساعتی با حجم‌های 0.01 تا 0.04 ساخته می‌شود." : "DEMO LAB armed; four hourly BUY/SELL tests per H4 candle use 0.01 through 0.04 lot.")
+      : (currentLanguage === "fa" ? "آزمایشگاه DEMO خاموش شد؛ فقط منطق عادی استراتژی اجرا می‌شود." : "DEMO LAB is off; normal strategy logic applies."));
+  });
+}
+if (autoCandleAnalysis && autoDemoExecution) {
+  // Arming is deliberately session-only: reload/close always returns to off.
+  autoCandleAnalysis.checked = false;
+  autoDemoExecution.checked = false;
+  autoDemoExecution.disabled = true;
+  autoCandleAnalysis.addEventListener("change", () => {
+    autoDemoExecution.disabled = !autoCandleAnalysis.checked;
+    if (!autoCandleAnalysis.checked) autoDemoExecution.checked = false;
+    observedCandleStartMs = null;
+    observedDemoHourSlotMs = null;
+    updateCandleClock();
+    setAutoCandleStatus(autoCandleAnalysis.checked
+      ? (currentLanguage === "fa" ? "تحلیل خودکار فعال است؛ منتظر بسته‌شدن کندل." : "Automatic analysis armed; waiting for candle close.")
+      : (currentLanguage === "fa" ? "خاموش؛ با تازه‌سازی صفحه دوباره خاموش می‌شود." : "Off; page refresh always disarms automation."));
+  });
+  autoDemoExecution.addEventListener("change", () => {
+    setAutoCandleStatus(autoDemoExecution.checked
+      ? (currentLanguage === "fa" ? "اجرای خودکار DEMO مسلح شد؛ در آزمایشگاه فقط امکان فنی ثبت سفارش بررسی می‌شود." : "Automatic DEMO execution armed; in DEMO LAB only technical order availability is checked.")
+      : (currentLanguage === "fa" ? "فقط تحلیل خودکار فعال است؛ سفارش خودکار ارسال نمی‌شود." : "Analysis only; automatic orders are off."));
+  });
+}
 
 ["accountBalance", "riskPercent", "stopPips", "pipValue"].forEach((id) => {
   const input = document.getElementById(id);
@@ -1778,6 +2160,7 @@ if (manualPricesInput) {
   });
 }
 setInterval(updateMarketSession, 60000);
+setInterval(updateCandleClock, 1000);
 
 if (form) {
   form.addEventListener("submit", async (event) => {

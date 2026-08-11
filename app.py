@@ -1,5 +1,6 @@
 ﻿import json
 import os
+import math
 import hashlib
 import secrets
 import threading
@@ -22,18 +23,27 @@ from analytics_engine import (
     calculate_atr,
     close_volatility,
     multi_timeframe_alignment,
+    latest_strategy_signal,
     run_backtest,
     run_ohlc_backtest,
 )
 from mt5_connector import MT5Connector, MT5ConnectorError
-from trading_engine import SignalSettings, TradingRuleError, build_risk_plan, generate_signal
+from market_intelligence import (
+    classify_market_regime, detect_market_drift, route_timeframe,
+    strategy_regime_risk,
+)
+from strategy_profiles import get_strategy_profile, normalize_interval, normalize_symbol
+from trading_engine import SignalSettings, TradingRuleError, build_risk_plan, capital_feasibility, generate_signal
 from storage import (
     add_journal_entry,
     finalize_order_execution,
     init_database,
     list_analyses,
     list_journal,
+    journal_performance,
     list_order_executions,
+    list_signal_events,
+    reconcile_journal_entry,
     reserve_order_execution,
     save_analysis,
     save_signal_event,
@@ -127,7 +137,17 @@ def _security_headers(response):
         response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
     return response
 
-DEFAULT_OPENAI_MODEL = os.getenv("TAHLIL_AI_MODEL") or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+DEFAULT_OPENAI_MODEL = (
+    os.getenv("TAHLIL_AI_PRIMARY_MODEL")
+    or os.getenv("TAHLIL_AI_MODEL1")
+    or os.getenv("TAHLIL_AI_MODEL")
+    or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+)
+REVIEW_AI_MODEL = (
+    os.getenv("TAHLIL_AI_REVIEW_MODEL")
+    or os.getenv("TAHLIL_AI_MODEL2")
+    or ""
+).strip()
 OPENAI_BASE_URL = os.getenv("TAHLIL_AI_BASE_URL") or os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
 TWELVEDATA_URL = "https://api.twelvedata.com/time_series"
 YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
@@ -274,7 +294,8 @@ def _fetch_twelvedata_time_series(symbol, interval, outputsize, api_key):
             },
             timeout=(8, 30),
         )
-        response.raise_for_status()
+        if not response.ok:
+            raise requests.HTTPError(f"TwelveData request failed with HTTP {response.status_code}.")
         return response.json()
 
 
@@ -298,7 +319,8 @@ def _fetch_businessquant_calendar(api_key, start_date=None, horizon_days=7):
             },
             timeout=(5, 15),
         )
-        response.raise_for_status()
+        if not response.ok:
+            raise requests.HTTPError(f"BusinessQuant request failed with HTTP {response.status_code}.")
         payload = response.json()
 
     rows = payload.get("data") if isinstance(payload, dict) else None
@@ -348,6 +370,9 @@ def _fetch_businessquant_calendar(api_key, start_date=None, horizon_days=7):
 
 def _get_macro_context():
     """Return cached macro context; a provider outage must never break technical analysis."""
+    mt5_context = _get_mt5_calendar_context()
+    if mt5_context.get("available"):
+        return mt5_context
     api_key = (
         os.getenv("TAHLIL_BUSINESSQUANT_API_KEY")
         or os.getenv("BUSINESSQUANT_API_KEY")
@@ -385,6 +410,58 @@ def _get_macro_context():
         _MACRO_CACHE["value"] = context
         _MACRO_CACHE["expires_at"] = time.monotonic() + ttl
     return context
+
+
+def _get_mt5_calendar_context():
+    """Read the native MT5 calendar exported by the MQL5 bridge."""
+    configured = os.getenv("TAHLIL_MT5_CALENDAR_FILE", "").strip()
+    if configured:
+        calendar_path = Path(configured)
+    else:
+        appdata = Path(os.getenv("APPDATA") or Path.home() / "AppData" / "Roaming")
+        calendar_path = appdata / "MetaQuotes" / "Terminal" / "Common" / "Files" / "TradeAI" / "economic_calendar.json"
+    try:
+        age_seconds = max(0.0, time.time() - calendar_path.stat().st_mtime)
+        if age_seconds > 15 * 60:
+            raise ValueError("stale")
+        payload = json.loads(calendar_path.read_text(encoding="utf-8-sig"))
+        events = []
+        for item in payload.get("events") or []:
+            epoch = int(item.get("time_server_epoch") or 0)
+            if epoch <= 0:
+                continue
+            event_time = datetime.fromtimestamp(epoch, timezone.utc)
+            events.append({
+                "code": str(item.get("event_code") or item.get("event_id") or ""),
+                "name": str(item.get("name") or "USD event"),
+                "category": "MT5 economic calendar",
+                "currency": "USD",
+                "release_date": event_time.date().isoformat(),
+                "release_time_server": event_time.isoformat(),
+                "importance": int(item.get("importance") or 0),
+                "time_mode": int(item.get("time_mode") or 0),
+                "actual": item.get("actual"),
+                "forecast": item.get("forecast"),
+                "previous": item.get("previous"),
+            })
+        return {
+            "available": True,
+            "source": "MT5 Economic Calendar",
+            "event_count": len(events),
+            "events": events,
+            "high_risk_dates": sorted({e["release_date"] for e in events if e["importance"] >= 2}),
+            "precision": "server_time",
+            "age_seconds": round(age_seconds, 1),
+            "limitations": "Exported by the local MQL5 bridge; BusinessQuant remains the fallback.",
+        }
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return {
+            "available": False,
+            "source": "MT5 Economic Calendar",
+            "event_count": 0,
+            "events": [],
+            "reason": "bridge_missing_or_stale",
+        }
 
 
 def _demo_execution_enabled():
@@ -425,10 +502,15 @@ def _macro_trade_gate(context, holding_hours=48):
     }
 
 
-def _true_timeframe_confirmation(summaries, candidate):
-    """Score real H1/H4/D1 summaries; this is not the old same-series slope proxy."""
+def _true_timeframe_confirmation(summaries, candidate, primary_timeframe="H4"):
+    """Score real closed-bar timeframes; this is not a same-series slope proxy."""
     candidate = str(candidate or "").upper()
-    weights = {"H1": 25, "H4": 45, "D1": 30}
+    primary_timeframe = str(primary_timeframe or "H4").upper()
+    weights = (
+        {"M15": 35, "H1": 30, "H4": 25, "D1": 10}
+        if primary_timeframe == "M15"
+        else {"H1": 25, "H4": 45, "D1": 30}
+    )
     scores = {}
     confirmations = 0
     contradictions = 0
@@ -456,7 +538,12 @@ def _true_timeframe_confirmation(summaries, candidate):
             "macd_bias": summary.get("macd_bias"),
             "rsi": summary.get("latest_rsi"),
         }
-    aligned = candidate in {"BUY", "SELL"} and confirmations >= 2 and contradictions == 0 and scores.get("H4", {}).get("score") == 100
+    aligned = (
+        candidate in {"BUY", "SELL"}
+        and confirmations >= 2
+        and contradictions == 0
+        and scores.get(primary_timeframe, {}).get("score") == 100
+    )
     return {
         "aligned": aligned,
         "score": int(round(total)),
@@ -464,7 +551,8 @@ def _true_timeframe_confirmation(summaries, candidate):
         "confirmations": confirmations,
         "contradictions": contradictions,
         "timeframes": scores,
-        "source": "real_mt5_H1_H4_D1",
+        "source": "real_mt5_M15_H1_H4_D1" if primary_timeframe == "M15" else "real_mt5_H1_H4_D1",
+        "primary_timeframe": primary_timeframe,
     }
 
 
@@ -501,9 +589,10 @@ def _validate_trade_ai_assessment(value, candidate):
     }
 
 
-def _call_trade_ai_assessment(snapshot, candidate):
+def _call_trade_ai_assessment(snapshot, candidate, primary_timeframe="H4", model_override=None):
     """AI is a bounded second opinion: it can veto/reduce risk, never bypass hard gates."""
-    api_key, model, endpoint = _ai_config_chat()
+    api_key, configured_model, endpoint = _ai_config_chat()
+    model = str(model_override or configured_model).strip()
     if not api_key:
         return {
             "decision": "uncertain", "direction": "HOLD", "confidence": 0,
@@ -524,9 +613,9 @@ def _call_trade_ai_assessment(snapshot, candidate):
         {
             "role": "system",
             "content": (
-                "You are the conservative AI risk gate for a DEMO-only XAUUSD H4 system. "
+                f"You are the conservative AI risk gate for a DEMO-only {snapshot.get('symbol', 'market')} {primary_timeframe} system. "
                 "Return one JSON object only. Never calculate or change entry, stop, target or volume. "
-                "Approve only when the supplied deterministic candidate, real H1/H4/D1 evidence, data quality, "
+                "Approve only when the supplied deterministic candidate, real multi-timeframe evidence, data quality, "
                 "market freshness and macro context agree. Otherwise veto or mark uncertain. "
                 "You may only reduce risk with risk_multiplier; never increase it. Do not infer news direction."
             ),
@@ -550,7 +639,8 @@ def _call_trade_ai_assessment(snapshot, candidate):
                 json={
                     "model": model,
                     "temperature": 0,
-                    "max_tokens": 700,
+                    # Qwen Max spends a material part of this budget reasoning.
+                    "max_tokens": 2500 if "qwen" in model.lower() and "max" in model.lower() else 700,
                     "response_format": {"type": "json_object"},
                     "messages": messages,
                 },
@@ -569,6 +659,27 @@ def _call_trade_ai_assessment(snapshot, candidate):
             "reasons": ["پاسخ ساختاریافته AI در دسترس نبود؛ معامله متوقف شد."],
             "invalidators": [], "model": model,
         }
+
+
+def _merge_ai_assessments(primary, reviewer, candidate, trigger):
+    """Two-model consensus is conservative: the reviewer can never increase risk."""
+    decisions = {str(primary.get("decision")), str(reviewer.get("decision"))}
+    decision = "veto" if "veto" in decisions else ("uncertain" if "uncertain" in decisions else "approve")
+    merged = dict(reviewer)
+    merged["decision"] = decision
+    merged["direction"] = candidate if decision == "approve" else "HOLD"
+    merged["risk_multiplier"] = min(
+        float(primary.get("risk_multiplier") or 0.25),
+        float(reviewer.get("risk_multiplier") or 0.25),
+    )
+    merged["primary_assessment"] = primary
+    merged["review_assessment"] = reviewer
+    merged["review_trigger"] = trigger
+    merged["models_agree"] = (
+        primary.get("decision") == reviewer.get("decision")
+        and primary.get("direction") == reviewer.get("direction")
+    )
+    return merged
 
 
 def _to_yahoo_forex_symbol(symbol):
@@ -975,10 +1086,16 @@ def mt5_status():
     try:
         with connector.session(require_demo=True) as (_, status):
             portfolio = connector.portfolio_snapshot(days=7)
+            server_market = connector.market_snapshot("XAUUSD")
             return jsonify({
                 "ok": True,
                 **status,
                 "portfolio": portfolio,
+                "server_clock": {
+                    "epoch_seconds": server_market.get("time_epoch"),
+                    "reported_time": server_market.get("time_utc"),
+                    "symbol": server_market.get("symbol"),
+                },
                 "execution_enabled": _demo_execution_enabled(),
                 "execution_mode": "demo_confirmed" if _demo_execution_enabled() else "signal_only",
             })
@@ -1036,32 +1153,51 @@ def mt5_signal_preview():
     _require_csrf()
     data = request.get_json(silent=True) or {}
     symbol = str(data.get("symbol") or "XAU/USD").strip()[:32]
-    interval = str(data.get("interval") or "4h").strip().lower()[:16]
+    interval = normalize_interval(str(data.get("interval") or "4h")[:16])
+    # Only a real JSON boolean may arm the experimental lab. Strings such as
+    # "false" must never enable a trading mode accidentally.
+    demo_lab_mode = data.get("demo_lab_mode") is True
+    disable_ai = data.get("disable_ai") is True
+    primary_ai_review = data.get("primary_ai_review") is True
+    deep_ai_review = data.get("deep_ai_review") is True
+    analysis_only = data.get("analysis_only") is True
+    demo_lab_slot = str(data.get("demo_lab_slot") or "").strip()[:40]
     try:
-        normalized_symbol = symbol.upper().replace("/", "").replace(" ", "")
-        if normalized_symbol != "XAUUSD" or interval not in {"4h", "h4"}:
-            raise TradingRuleError("موتور معامله فعلاً فقط برای XAU/USD در تایم‌فریم H4 تأیید شده است.")
+        requested_lab_volume = float(data.get("demo_lab_volume") or 0.01)
+    except (TypeError, ValueError):
+        requested_lab_volume = 0.01
+    try:
+        normalized_symbol = normalize_symbol(symbol)
+        profile = get_strategy_profile(normalized_symbol, interval)
+        if profile is None:
+            raise TradingRuleError("برای این نماد و تایم‌فریم پروفایل کنترل‌شده‌ای ثبت نشده است.")
         count = min(max(int(data.get("outputsize") or 500), 200), 1_000)
+        requested_risk = float(data.get("risk_percent") or profile.risk_percent)
+        requested_daily_trades = int(data.get("maximum_daily_trades") or profile.maximum_daily_trades)
         settings = SignalSettings(
-            minimum_strength=int(data.get("minimum_strength") or 70),
-            maximum_spread_pips=float(data.get("maximum_spread_pips") or 2.0),
-            maximum_spread_bps=float(data.get("maximum_spread_bps") or 3.0),
-            risk_percent=float(data.get("risk_percent") or 0.1),
-            maximum_volume=float(data.get("maximum_volume") or 0.1),
-            atr_stop_multiple=float(data.get("atr_stop_multiple") or 1.0),
-            reward_risk=float(data.get("reward_risk") or 2.5),
-            maximum_daily_loss_percent=float(data.get("maximum_daily_loss_percent") or 1.0),
-            maximum_open_positions=int(data.get("maximum_open_positions") or 1),
-            maximum_consecutive_losses=int(data.get("maximum_consecutive_losses") or 2),
-            loss_cooldown_hours=int(data.get("loss_cooldown_hours") or 12),
-            maximum_daily_trades=int(data.get("maximum_daily_trades") or 3),
-            ai_minimum_confidence=int(data.get("ai_minimum_confidence") or 70),
-            require_ai_confirmation=True,
+            minimum_strength=50 if demo_lab_mode else max(int(data.get("minimum_strength") or profile.minimum_strength), profile.minimum_strength),
+            maximum_spread_pips=min(float(data.get("maximum_spread_pips") or profile.maximum_spread_pips), profile.maximum_spread_pips),
+            maximum_spread_bps=min(float(data.get("maximum_spread_bps") or profile.maximum_spread_bps), profile.maximum_spread_bps),
+            risk_percent=min(requested_risk, profile.risk_percent),
+            maximum_volume=min(max(requested_lab_volume, 0.01), 0.10) if demo_lab_mode else min(float(data.get("maximum_volume") or profile.maximum_volume), profile.maximum_volume),
+            atr_stop_multiple=profile.atr_stop_multiple,
+            reward_risk=profile.reward_risk,
+            maximum_daily_loss_percent=min(float(data.get("maximum_daily_loss_percent") or profile.maximum_daily_loss_percent), profile.maximum_daily_loss_percent),
+            maximum_open_positions=min(int(data.get("maximum_open_positions") or profile.maximum_open_positions), profile.maximum_open_positions),
+            maximum_symbol_open_positions=profile.maximum_symbol_open_positions,
+            maximum_symbol_daily_trades=10 if demo_lab_mode else profile.maximum_symbol_daily_trades,
+            maximum_consecutive_losses=min(int(data.get("maximum_consecutive_losses") or profile.maximum_consecutive_losses), profile.maximum_consecutive_losses),
+            loss_cooldown_hours=max(int(data.get("loss_cooldown_hours") or profile.loss_cooldown_hours), profile.loss_cooldown_hours),
+            # Six H4 candles can close per day. The lab allows one observation
+            # per candle plus headroom around broker/server day boundaries.
+            maximum_daily_trades=20 if demo_lab_mode else min(requested_daily_trades, profile.maximum_daily_trades),
+            ai_minimum_confidence=50 if demo_lab_mode else max(int(data.get("ai_minimum_confidence") or profile.ai_minimum_confidence), profile.ai_minimum_confidence),
+            require_ai_confirmation=not demo_lab_mode,
         ).validated()
-        rsi_period = int(data.get("rsi_period") or 21)
-        macd_short = int(data.get("macd_short_period") or 8)
-        macd_long = int(data.get("macd_long_period") or 21)
-        macd_signal = int(data.get("macd_signal_period") or 5)
+        rsi_period = profile.rsi_period
+        macd_short = profile.macd_short
+        macd_long = profile.macd_long
+        macd_signal = profile.macd_signal
         if not 2 <= rsi_period <= 100:
             raise ValueError("RSI period must be between 2 and 100.")
         if not (2 <= macd_short < macd_long <= 200):
@@ -1072,10 +1208,14 @@ def mt5_signal_preview():
         connector = MT5Connector()
         with connector.session(require_demo=True) as (_, status):
             timeframe_data = {
-                "H1": connector.fetch_candles(symbol, "1h", count=300, include_incomplete=False),
-                "H4": connector.fetch_candles(symbol, "4h", count=count, include_incomplete=False),
+                "H1": connector.fetch_candles(symbol, "1h", count=count if profile.primary_timeframe == "H1" else 300, include_incomplete=False),
+                "H4": connector.fetch_candles(symbol, "4h", count=count if profile.primary_timeframe == "H4" else 500, include_incomplete=False),
                 "D1": connector.fetch_candles(symbol, "1day", count=250, include_incomplete=False),
             }
+            if profile.primary_timeframe == "M15":
+                timeframe_data["M15"] = connector.fetch_candles(
+                    symbol, "15min", count=count, include_incomplete=False
+                )
             portfolio = connector.portfolio_snapshot(days=7)
 
         summaries = {}
@@ -1090,21 +1230,55 @@ def mt5_signal_preview():
             )
             summaries[timeframe_name] = _compute_signal_summary(timeframe_prices, timeframe_rsi, timeframe_macd)
 
-        market_data = timeframe_data["H4"]
+        market_data = timeframe_data[profile.primary_timeframe]
         prices = market_data["prices"]
-        summary = summaries["H4"]
+        summary = summaries[profile.primary_timeframe]
+        if profile.strategy_family != "rsi_macd":
+            summary.update(latest_strategy_signal(
+                prices, profile.strategy_family, profile.strategy_options,
+                timestamps=market_data.get("labels"), highs=market_data.get("highs"),
+                lows=market_data.get("lows"),
+            ))
+            summary["latest_price"] = float(prices[-1])
+        original_action_bias = str(summary.get("action_bias") or "Wait")
+        if demo_lab_mode and not any(word in original_action_bias.lower() for word in ("buy", "sell")):
+            fast_window = min(21, len(prices))
+            slow_window = min(89, len(prices))
+            fast_mean = float(np.mean(prices[-fast_window:]))
+            slow_mean = float(np.mean(prices[-slow_window:]))
+            lab_direction = "BUY" if fast_mean >= slow_mean else "SELL"
+            summary["action_bias"] = f"{lab_direction} bias"
+            summary["signal_strength"] = 55
+            summary["signal_factors"] = [
+                "DEMO LAB probe: direction selected from EMA-style 21/89 trend.",
+                f"Fast mean={fast_mean:.6f}; slow mean={slow_mean:.6f}.",
+            ]
+            summary["demo_lab_forced_direction"] = True
+            summary["demo_lab_original_action"] = original_action_bias
         atr_values = calculate_atr(
             market_data["highs"], market_data["lows"], prices, period=14
         )
         summary["latest_atr"] = _last_non_nan(atr_values.tolist())
         summary["volatility_source"] = "ATR"
+        regime_assessment = classify_market_regime(
+            market_data["highs"], market_data["lows"], prices
+        )
+        drift_assessment = detect_market_drift(prices)
+        strategy_route = route_timeframe(market_data["symbol"], regime_assessment)
+        strategy_route["selected_interval"] = interval
+        strategy_route["route_matches_selection"] = (
+            strategy_route.get("decision") != "HOLD"
+            and strategy_route.get("recommended_interval") in {None, interval}
+        )
         candidate = "BUY" if "buy" in str(summary.get("action_bias") or "").lower() else (
             "SELL" if "sell" in str(summary.get("action_bias") or "").lower() else "HOLD"
         )
-        timeframe_confirmation = _true_timeframe_confirmation(summaries, candidate)
+        timeframe_confirmation = _true_timeframe_confirmation(summaries, candidate, profile.primary_timeframe)
         summary["timeframe_alignment"] = timeframe_confirmation
         macro_context = _get_macro_context()
-        macro_gate = _macro_trade_gate(macro_context, holding_hours=24)
+        interval_hours = {"15min": 0.25, "30min": 0.5, "1h": 1.0, "4h": 4.0, "1day": 24.0}
+        holding_hours = profile.holding_bars * interval_hours.get(interval, 4.0)
+        macro_gate = _macro_trade_gate(macro_context, holding_hours=holding_hours)
 
         hard_ready_for_ai = all([
             candidate in {"BUY", "SELL"},
@@ -1116,44 +1290,107 @@ def mt5_signal_preview():
             status.get("account", {}).get("expert_allowed"),
             timeframe_confirmation.get("aligned"),
             macro_gate.get("clear"),
+            not drift_assessment.get("block_new_entries"),
+            strategy_route.get("route_matches_selection"),
         ])
-        if hard_ready_for_ai:
-            ai_snapshot = {
-                "symbol": market_data["symbol"],
-                "primary_timeframe": "H4",
-                "h4_summary": summary,
-                "real_timeframes": timeframe_confirmation,
-                "market": {
-                    key: market_data["market"].get(key)
-                    for key in ("bid", "ask", "spread_bps", "tick_age_seconds", "market_open")
-                },
-                "data_quality": market_data["quality"],
-                "portfolio": portfolio,
-                "macro_gate": macro_gate,
-                "recent_h4_ohlc": market_data["candles"][-20:],
-            }
-            ai_assessment = _call_trade_ai_assessment(ai_snapshot, candidate)
+        ai_snapshot = {
+            "symbol": market_data["symbol"],
+            "primary_timeframe": profile.primary_timeframe,
+            "primary_summary": summary,
+            "real_timeframes": timeframe_confirmation,
+            "market": {
+                key: market_data["market"].get(key)
+                for key in ("bid", "ask", "spread_bps", "tick_age_seconds", "market_open")
+            },
+            "data_quality": market_data["quality"],
+            "portfolio": portfolio,
+            "macro_gate": macro_gate,
+            "deterministic_regime": regime_assessment,
+            "drift": drift_assessment,
+            "strategy_route": strategy_route,
+            "recent_primary_ohlc": market_data["candles"][-20:],
+        }
+        requested_ai_ready = (primary_ai_review or deep_ai_review) and all([
+            candidate in {"BUY", "SELL"},
+            market_data["quality"].get("safe_for_signal"),
+            market_data["market"].get("market_open"),
+            status.get("connected"),
+        ])
+        if not disable_ai and (hard_ready_for_ai or requested_ai_ready):
+            # Expensive mode is a separate, single-model path. It must never
+            # call Gemini first and therefore incurs exactly one Qwen request.
+            if deep_ai_review and REVIEW_AI_MODEL:
+                review_assessment = _call_trade_ai_assessment(
+                    ai_snapshot, candidate, profile.primary_timeframe, REVIEW_AI_MODEL
+                )
+                ai_assessment = dict(review_assessment)
+                ai_assessment.update({
+                    "primary_assessment": None,
+                    "review_assessment": review_assessment,
+                    "review_trigger": "manual",
+                    "models_agree": None,
+                    "deep_review": True,
+                })
+            else:
+                primary_assessment = _call_trade_ai_assessment(
+                    ai_snapshot, candidate, profile.primary_timeframe, DEFAULT_OPENAI_MODEL
+                )
+                ai_assessment = dict(primary_assessment)
+                ai_assessment.update({
+                    "primary_assessment": primary_assessment,
+                    "review_assessment": None,
+                    "review_trigger": None,
+                    "models_agree": None,
+                    "deep_review": False,
+                })
         else:
             ai_assessment = {
                 "decision": "uncertain", "direction": "HOLD", "confidence": 0,
-                "risk_multiplier": 0.25, "regime": "blocked", "news_risk": "unknown",
-                "reasons": ["یک یا چند قفل قطعی پیش از فراخوانی AI رد شده است."],
-                "invalidators": [], "model": DEFAULT_OPENAI_MODEL,
+                "risk_multiplier": 0.25, "regime": "disabled" if disable_ai else "blocked", "news_risk": "unknown",
+                "reasons": ["تحلیل عددی رایگان انتخاب شد؛ هیچ مدل AI فراخوانی نشد."] if disable_ai else ["یک یا چند قفل قطعی پیش از فراخوانی AI رد شده است."],
+                "invalidators": [], "model": None if disable_ai else DEFAULT_OPENAI_MODEL,
             }
 
+        if demo_lab_mode:
+            signal_timeframe_confirmation = {
+                **timeframe_confirmation,
+                "aligned": True,
+                "lab_bypass": True,
+                "score": int(timeframe_confirmation.get("score") or 0),
+            }
+            signal_ai_assessment = None
+            # DEMO LAB records the news/drift context but does not use it as a
+            # strategy veto. This mode exists specifically to collect demo
+            # BUY/SELL observations, including losing ones.
+            signal_macro_gate = {"clear": True, "lab_bypass": True}
+            effective_risk_multiplier = 1.0
+        else:
+            signal_timeframe_confirmation = timeframe_confirmation
+            signal_ai_assessment = ai_assessment
+            signal_macro_gate = macro_gate
+            effective_risk_multiplier = min(
+                float(ai_assessment.get("risk_multiplier") or 0.25),
+                float(drift_assessment.get("risk_multiplier") or 0.25),
+                strategy_regime_risk(profile.strategy_family, regime_assessment.get("regime")),
+            )
+        ai_assessment["effective_risk_multiplier"] = effective_risk_multiplier
+
+        signal_candle_time = market_data["labels"][-1]
+        if demo_lab_mode and demo_lab_slot:
+            signal_candle_time = f"{signal_candle_time}#hour-{demo_lab_slot}"
         initial = generate_signal(
             summary,
             market_data["market"],
             market_data["quality"],
             symbol=market_data["symbol"],
             interval=interval,
-            candle_time=market_data["labels"][-1],
+            candle_time=signal_candle_time,
             settings=settings,
             account_status=status,
             portfolio=portfolio,
-            timeframe_confirmation=timeframe_confirmation,
-            macro_gate=macro_gate,
-            ai_assessment=ai_assessment,
+            timeframe_confirmation=signal_timeframe_confirmation,
+            macro_gate=signal_macro_gate,
+            ai_assessment=signal_ai_assessment,
         )
         duplicate = signal_exists(_owner_id(), initial["signal_key"])
         signal = generate_signal(
@@ -1162,28 +1399,72 @@ def mt5_signal_preview():
             market_data["quality"],
             symbol=market_data["symbol"],
             interval=interval,
-            candle_time=market_data["labels"][-1],
+            candle_time=signal_candle_time,
             settings=settings,
             duplicate=duplicate,
             account_status=status,
             portfolio=portfolio,
-            timeframe_confirmation=timeframe_confirmation,
-            macro_gate=macro_gate,
-            ai_assessment=ai_assessment,
+            timeframe_confirmation=signal_timeframe_confirmation,
+            macro_gate=signal_macro_gate,
+            ai_assessment=signal_ai_assessment,
         )
+        if demo_lab_mode:
+            signal["demo_lab_mode"] = True
+            signal["signal"] = signal["candidate"]
+            signal["display_signal"] = signal["candidate"]
+            signal["execution_mode"] = "demo_lab"
+            signal["demo_lab_slot"] = demo_lab_slot or None
+            signal["demo_lab_volume"] = settings.maximum_volume
+            signal["reasons"] = [
+                "DEMO LAB: جهت آزمایشی برای جمع‌آوری نتیجه دمو انتخاب شد.",
+                *[str(item) for item in summary.get("signal_factors") or []][:2],
+            ]
+        # This payload is persisted when the demo order is sent, then joined to
+        # its realized broker outcome for later model comparison reports.
+        signal["ai_assessment"] = ai_assessment
+
+        lab_execution_allowed = True
+        if demo_lab_mode:
+            # These are execution facts, not strategy HOLD/BLOCK decisions.
+            # MetaTrader still cannot accept an order with a closed market,
+            # disconnected terminal, exhausted demo caps, or duplicate candle.
+            required_execution_filters = (
+                "closed_candle", "data_quality", "symbol_tradeable",
+                "market_open_and_fresh", "terminal_and_account_ready",
+                "not_duplicate",
+            )
+            lab_execution_allowed = all(
+                bool(signal.get("filters", {}).get(name))
+                for name in required_execution_filters
+            )
+            signal["execution_available"] = lab_execution_allowed
 
         risk_plan = None
         broker_check = None
         execution_token = None
+        feasibility = capital_feasibility(
+            summary,
+            market_data["market"],
+            equity=float(status.get("account", {}).get("equity") or 0),
+            risk_percent=settings.risk_percent,
+            atr_stop_multiple=settings.atr_stop_multiple,
+            risk_multiplier=effective_risk_multiplier,
+        )
         if signal["signal"] in {"BUY", "SELL"}:
             risk_plan = build_risk_plan(
                 signal["signal"], summary, market_data["market"], status["account"], settings,
-                risk_multiplier=ai_assessment.get("risk_multiplier", 0.25),
+                risk_multiplier=effective_risk_multiplier,
             )
+            if demo_lab_mode:
+                # The three manual lab buttons intentionally present their own
+                # requested starting volume; the user can still lower it before
+                # confirmation and the broker performs a final margin check.
+                risk_plan["volume"] = settings.maximum_volume
             signal["risk_plan"] = risk_plan
-            with connector.session(require_demo=True):
-                broker_check = connector.check_demo_order(market_data["symbol"], signal["signal"], risk_plan)
-            if _demo_execution_enabled():
+            if not demo_lab_mode or lab_execution_allowed:
+                with connector.session(require_demo=True):
+                    broker_check = connector.check_demo_order(market_data["symbol"], signal["signal"], risk_plan)
+            if not analysis_only and _demo_execution_enabled() and profile.forward_demo_enabled and (not demo_lab_mode or lab_execution_allowed):
                 execution_token = secrets.token_urlsafe(32)
                 session["pending_demo_order"] = {
                     "token": execution_token,
@@ -1193,13 +1474,34 @@ def mt5_signal_preview():
                     "direction": signal["signal"],
                     "plan": risk_plan,
                     "settings": {
-                        "maximum_open_positions": settings.maximum_open_positions,
+                        "maximum_open_positions": 100 if demo_lab_mode else settings.maximum_open_positions,
+                        "maximum_symbol_open_positions": 100 if demo_lab_mode else settings.maximum_symbol_open_positions,
+                        "maximum_symbol_daily_trades": 100 if demo_lab_mode else settings.maximum_symbol_daily_trades,
                         "maximum_daily_loss_percent": settings.maximum_daily_loss_percent,
                         "maximum_consecutive_losses": settings.maximum_consecutive_losses,
                         "loss_cooldown_hours": settings.loss_cooldown_hours,
-                        "maximum_daily_trades": settings.maximum_daily_trades,
+                        "maximum_daily_trades": 100 if demo_lab_mode else settings.maximum_daily_trades,
                     },
                     "signal": signal,
+                    "market_context": {
+                        "demo_lab_mode": demo_lab_mode,
+                        "regime": regime_assessment.get("regime"),
+                        "regime_confidence": regime_assessment.get("confidence"),
+                        "drift_level": drift_assessment.get("level"),
+                        "strategy_family": "demo_lab_ema_21_89" if demo_lab_mode else profile.strategy_family,
+                        "interval": interval,
+                        "strategy_route": strategy_route,
+                        "ai_decision": ai_assessment.get("decision"),
+                        "ai_confidence": ai_assessment.get("confidence"),
+                        "ai_selected_model": ai_assessment.get("model"),
+                        "ai_primary_model": (ai_assessment.get("primary_assessment") or {}).get("model"),
+                        "ai_review_model": (ai_assessment.get("review_assessment") or {}).get("model"),
+                        "ai_models_agree": ai_assessment.get("models_agree"),
+                        "ai_review_trigger": ai_assessment.get("review_trigger"),
+                        "effective_risk_multiplier": effective_risk_multiplier,
+                        "spread_bps": market_data["market"].get("spread_bps"),
+                        "news_risk": ai_assessment.get("news_risk"),
+                    },
                 }
 
         return jsonify({
@@ -1215,10 +1517,26 @@ def mt5_signal_preview():
             "ai_assessment": ai_assessment,
             "timeframe_confirmation": timeframe_confirmation,
             "macro_gate": macro_gate,
+            "market_intelligence": {
+                "regime": regime_assessment,
+                "drift": drift_assessment,
+                "strategy_route": strategy_route,
+            },
             "broker_check": broker_check,
             "execution_mode": "demo_confirmed" if _demo_execution_enabled() else "signal_only",
             "execution_enabled": _demo_execution_enabled(),
             "execution_ready": bool(execution_token),
+            "analysis_only": analysis_only,
+            "ai_disabled": disable_ai,
+            "primary_ai_review": primary_ai_review,
+            "deep_ai_review": deep_ai_review,
+            "demo_lab_mode": demo_lab_mode,
+            "strategy_profile": profile.public(),
+            "qualification_execution_blocked": not profile.forward_demo_enabled,
+            "execution_tier": "demo_lab" if demo_lab_mode else ("qualified_forward_demo" if profile.research_qualified else (
+                "experimental_forward_demo" if profile.forward_demo_enabled else "research_only"
+            )),
+            "capital_feasibility": feasibility,
             "execution_token": execution_token,
             "execution_expires_seconds": 300 if execution_token else None,
             "order_sent": False,
@@ -1229,6 +1547,9 @@ def mt5_signal_preview():
                 "macd_signal": macd_signal,
                 "atr_stop_multiple": settings.atr_stop_multiple,
                 "reward_risk": settings.reward_risk,
+                "holding_bars": profile.holding_bars,
+                "strategy_family": profile.strategy_family,
+                "strategy_options": profile.strategy_options,
             },
         })
     except (MT5ConnectorError, TradingRuleError, TypeError, ValueError) as exc:
@@ -1255,6 +1576,56 @@ def mt5_execute_demo():
     if not provided_token or not compare_digest(provided_token, str(pending.get("token") or "")):
         return jsonify({"ok": False, "error": "توکن تأیید سفارش معتبر نیست."}), 403
 
+    is_demo_lab = bool((pending.get("market_context") or {}).get("demo_lab_mode"))
+    overrides = data.get("plan_overrides") or {}
+    if overrides:
+        if not is_demo_lab:
+            return jsonify({"ok": False, "error": "ویرایش سریع پلن فقط در آزمایشگاه DEMO مجاز است."}), 403
+        original_plan = dict(pending.get("plan") or {})
+        try:
+            entry = float(original_plan["entry"])
+            original_stop = float(original_plan["stop_loss"])
+            original_target = float(original_plan["take_profit"])
+            original_volume = float(original_plan["volume"])
+            volume = float(overrides.get("volume", original_volume))
+            stop_loss = float(overrides.get("stop_loss", original_stop))
+            take_profit = float(overrides.get("take_profit", original_target))
+        except (KeyError, TypeError, ValueError):
+            return jsonify({"ok": False, "error": "لات، حد ضرر یا حد سود معتبر نیست."}), 400
+        if not all(math.isfinite(value) for value in (entry, volume, stop_loss, take_profit)):
+            return jsonify({"ok": False, "error": "مقادیر پلن باید عدد محدود و معتبر باشند."}), 400
+        if volume < 0.01 or volume > 0.10:
+            return jsonify({"ok": False, "error": "حجم اجرای سریع باید بین 0.01 و 0.10 لات باشد."}), 400
+        direction = str(pending.get("direction") or "").upper()
+        original_stop_distance = abs(entry - original_stop)
+        stop_distance = abs(entry - stop_loss)
+        target_distance = abs(take_profit - entry)
+        directional_prices_ok = (
+            direction == "BUY" and stop_loss < entry < take_profit
+        ) or (
+            direction == "SELL" and take_profit < entry < stop_loss
+        )
+        if not directional_prices_ok:
+            return jsonify({"ok": False, "error": "جای حد ضرر و حد سود با جهت معامله سازگار نیست."}), 400
+        if stop_distance <= 0 or stop_distance > original_stop_distance * 1.001:
+            return jsonify({"ok": False, "error": "برای کنترل ریسک، حد ضرر را فقط می‌توان نزدیک‌تر کرد، نه دورتر."}), 400
+        if target_distance <= 0 or target_distance > original_stop_distance * 5:
+            return jsonify({"ok": False, "error": "فاصله حد سود از محدوده مجاز اجرای سریع خارج است."}), 400
+        risk_scale = (volume / original_volume) * (stop_distance / original_stop_distance) if original_volume > 0 and original_stop_distance > 0 else 1
+        original_plan.update({
+            "volume": round(volume, 2),
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "stop_distance": stop_distance,
+            "reward_risk": round(target_distance / stop_distance, 3),
+            "estimated_risk_amount": round(float(original_plan.get("estimated_risk_amount") or 0) * risk_scale, 2),
+            "quick_adjusted": True,
+        })
+        pending["plan"] = original_plan
+        signal_payload = dict(pending.get("signal") or {})
+        signal_payload["risk_plan"] = original_plan
+        pending["signal"] = signal_payload
+
     owner_id = _owner_id()
     signal_key = str(pending.get("signal_key") or "")
     if signal_exists(owner_id, signal_key):
@@ -1263,7 +1634,8 @@ def mt5_execute_demo():
     token_hash = hashlib.sha256(provided_token.encode("utf-8")).hexdigest()
     reservation_payload = {
         "symbol": pending.get("symbol"), "direction": pending.get("direction"),
-        "plan": pending.get("plan"), "created_from": "ai_confirmed_preview",
+        "plan": pending.get("plan"),
+        "created_from": "demo_lab" if (pending.get("market_context") or {}).get("demo_lab_mode") else "ai_confirmed_preview",
     }
     if not reserve_order_execution(owner_id, signal_key, token_hash, reservation_payload):
         session.pop("pending_demo_order", None)
@@ -1280,13 +1652,18 @@ def mt5_execute_demo():
                 raise TradingRuleError("اجازه معامله در ترمینال یا حساب فعال نیست.")
             if int(portfolio.get("open_position_count") or 0) >= int(limits.get("maximum_open_positions") or 1):
                 raise TradingRuleError("حداکثر پوزیشن باز پر شده است.")
+            normalized_pending_symbol = normalize_symbol(str(pending.get("symbol") or ""))
+            if int((portfolio.get("open_position_count_by_symbol") or {}).get(normalized_pending_symbol) or 0) >= int(limits.get("maximum_symbol_open_positions") or 1):
+                raise TradingRuleError("سقف پوزیشن باز این نماد پر شده است.")
             if int(portfolio.get("daily_trade_count") or 0) >= int(limits.get("maximum_daily_trades") or 3):
                 raise TradingRuleError("سقف معامله روزانه پر شده است.")
+            if int((portfolio.get("daily_trade_count_by_symbol") or {}).get(normalized_pending_symbol) or 0) >= int(limits.get("maximum_symbol_daily_trades") or 1):
+                raise TradingRuleError("سقف معامله روزانه این نماد پر شده است.")
             equity = float(account.get("equity") or 0)
             daily_loss = abs(min(0.0, float(portfolio.get("daily_realized_net") or 0))) / equity * 100 if equity > 0 else 100
-            if daily_loss >= float(limits.get("maximum_daily_loss_percent") or 1):
+            if not is_demo_lab and daily_loss >= float(limits.get("maximum_daily_loss_percent") or 1):
                 raise TradingRuleError("سقف زیان روزانه فعال شده است.")
-            if int(portfolio.get("consecutive_losses") or 0) >= int(limits.get("maximum_consecutive_losses") or 2):
+            if not is_demo_lab and int(portfolio.get("consecutive_losses") or 0) >= int(limits.get("maximum_consecutive_losses") or 2):
                 latest_loss = portfolio.get("latest_loss_time_utc")
                 try:
                     latest_loss_time = datetime.fromisoformat(str(latest_loss).replace("Z", "+00:00"))
@@ -1313,7 +1690,11 @@ def mt5_execute_demo():
             "stop_loss": plan.get("stop_loss"),
             "take_profit": plan.get("take_profit"),
             "status": "open",
-            "notes": f"MT5 demo order={result.get('order')} deal={result.get('deal')} volume={result.get('volume')}",
+            "notes": f"{'DEMO LAB · ' if (pending.get('market_context') or {}).get('demo_lab_mode') else ''}MT5 demo order={result.get('order')} deal={result.get('deal')} volume={result.get('volume')}",
+            "signal_key": signal_key,
+            "order_ticket": result.get("order"),
+            "deal_ticket": result.get("deal"),
+            "context": pending.get("market_context") or {},
         })
         return jsonify({"ok": True, "order_sent": True, "result": result})
     except (MT5ConnectorError, TradingRuleError, TypeError, ValueError) as exc:
@@ -1325,6 +1706,45 @@ def mt5_execute_demo():
         }), 409
 
 
+@app.route("/mt5/reconcile-demo", methods=["POST"])
+@rate_limit(6, 60)
+def mt5_reconcile_demo():
+    """Reconcile only journal rows carrying an exact broker-linked signal key."""
+    login_error = _mt5_login_required()
+    if login_error:
+        return login_error
+    _require_csrf()
+    owner_id = _owner_id()
+    executions = list_order_executions(owner_id, limit=100)
+    connector = MT5Connector()
+    try:
+        with connector.session(require_demo=True):
+            outcomes = connector.closed_trade_outcomes(days=30)
+        by_deal = {
+            ticket: outcome
+            for outcome in outcomes
+            for ticket in outcome.get("entry_deal_tickets") or []
+            if ticket
+        }
+        by_order = {
+            ticket: outcome
+            for outcome in outcomes
+            for ticket in outcome.get("entry_order_tickets") or []
+            if ticket
+        }
+        reconciled = []
+        for execution in executions:
+            if execution.get("status") != "sent":
+                continue
+            result = execution.get("result") or {}
+            outcome = by_deal.get(int(result.get("deal") or 0)) or by_order.get(int(result.get("order") or 0))
+            if outcome and reconcile_journal_entry(owner_id, execution["signal_key"], outcome):
+                reconciled.append({"signal_key": execution["signal_key"], **outcome})
+        return jsonify({"ok": True, "reconciled_count": len(reconciled), "items": reconciled})
+    except (MT5ConnectorError, TypeError, ValueError) as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 503
+
+
 @app.route("/mt5/executions", methods=["GET"])
 @rate_limit(20, 60)
 def mt5_executions():
@@ -1332,6 +1752,61 @@ def mt5_executions():
     if login_error:
         return login_error
     return jsonify({"ok": True, "items": list_order_executions(_owner_id(), limit=30)})
+
+
+@app.route("/research/multi-asset", methods=["GET"])
+@rate_limit(20, 60)
+def multi_asset_research_report():
+    login_error = _mt5_login_required()
+    if login_error:
+        return login_error
+    report_files = {
+        "H4": Path(APP_ROOT) / "data" / "multi-asset-research-latest.json",
+        "H1": Path(APP_ROOT) / "data" / "multi-asset-research-h1.json",
+        "M15": Path(APP_ROOT) / "data" / "research-m15-trend.json",
+    }
+    reports = {}
+    for timeframe, path in report_files.items():
+        if not path.is_file():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        reports[timeframe] = {
+            "qualified_count": int(payload.get("qualified_count") or 0),
+            "markets": [
+                {
+                    "symbol": item.get("symbol"), "asset": item.get("asset"),
+                    "qualified": bool(item.get("qualified")),
+                    "strategy_family": (item.get("parameters") or {}).get("strategy_family"),
+                    "parameters": item.get("parameters"),
+                    "test": item.get("test"), "stress_test": item.get("stress_test"),
+                    "qualification_checks": item.get("qualification_checks"),
+                    "execution_symbol": item.get("execution_symbol"),
+                }
+                for item in payload.get("markets") or []
+                if normalize_symbol(item.get("symbol")) in {"XAUUSD", "EURUSD", "GBPUSD", "USDJPY"}
+            ],
+        }
+    return jsonify({"ok": True, "reports": reports})
+
+
+@app.route("/research/fast-validation", methods=["POST"])
+@rate_limit(4, 300)
+def fast_strategy_validation():
+    """Run frozen-profile replay quickly; this endpoint never sends an order."""
+    login_error = _mt5_login_required()
+    if login_error:
+        return login_error
+    _require_csrf()
+    data = request.get_json(silent=True) or {}
+    try:
+        candles = int(data.get("candles") or 5_000)
+        from fast_validation import run_fast_validation
+        return jsonify(run_fast_validation(candles))
+    except (MT5ConnectorError, TypeError, ValueError) as exc:
+        return jsonify({"ok": False, "error": str(exc), "orders_sent": 0}), 503
 
 
 @app.route("/fetch_forex_prices", methods=["POST"])
@@ -1539,7 +2014,11 @@ def backtest():
 @app.route("/history", methods=["GET"])
 @rate_limit(60, 60)
 def history():
-    return jsonify({"items": list_analyses(_owner_id(), limit=30)})
+    owner_id = _owner_id()
+    return jsonify({
+        "items": list_analyses(owner_id, limit=30),
+        "automated_signals": list_signal_events(owner_id, limit=50),
+    })
 
 
 @app.route("/journal", methods=["GET", "POST"])
@@ -1547,7 +2026,7 @@ def history():
 def journal():
     owner_id = _owner_id()
     if request.method == "GET":
-        return jsonify({"items": list_journal(owner_id, limit=50)})
+        return jsonify({"items": list_journal(owner_id, limit=50), "performance": journal_performance(owner_id)})
 
     _require_csrf()
     data = request.get_json(silent=True) or {}
@@ -1954,13 +2433,20 @@ def analyze_with_ai():
 # ─── چت‌بات آموزشی صفحه ───────────────────────────────────────────────────────
 ASSISTANT_SYSTEM_PROMPT = (
     "تو «استاد کاوش» هستی؛ استاد معامله‌گری و مشاور فارسی‌زبان در داشبورد TradeAI. "
-    "شخصیتت آرام، باتجربه، صمیمی و در مدیریت ریسک سخت‌گیر است. پاسخ را آموزشی و قابل‌فهم می‌دهی، "
-    "کاربر را هیجان‌زده یا به ورود عجولانه تشویق نمی‌کنی و وقتی شواهد کافی نیست، صریحاً پیشنهاد صبر می‌دهی. "
-    "به سوال‌های کاربر درباره‌ی همین صفحه پاسخ می‌دهی — معنی و کاربرد اندیکاتورهای انتخاب‌شده "
-    "(RSI، MACD و…)، تفسیر داده‌ها و نمودارها، جمع‌بندی تصمیم، و مفاهیم معامله‌گری (اسکالپ/دی‌تریدینگ/سوینگ). "
-    "از «اطلاعاتِ صفحه» که در اختیارت گذاشته می‌شود استفاده کن و دقیق و کوتاه جواب بده. "
+    "نسخه فعلی برنامه روی حساب DEMO متاتریدر ۵ و XAUUSD H4 متمرکز است. سه مسیر دستی دارد: "
+    "گزینه ۱ تحلیل عددی بدون AI با لات پیش‌فرض 0.01؛ گزینه ۲ فقط Gemini ارزان با لات پیش‌فرض 0.05؛ "
+    "گزینه ۳ فقط Qwen گران با لات پیش‌فرض 0.08. Qwen هرگز خودکار اجرا نمی‌شود. "
+    "هر سه ابتدا پلن ورود، حدضرر، حدسود و حجم قابل‌ویرایش می‌سازند؛ هیچ سفارشی بدون تأیید DEMO ارسال نمی‌شود. "
+    "اعتبار پلن پنج دقیقه است، کنترل قیمت لحظه‌ای و مارجین در MT5 انجام می‌شود و سقف تغییر ورود 5 bps است. "
+    "تحلیل‌ها، مدل استفاده‌شده و معاملات اجراشده برای گزارش بعدی در تاریخچه/ژورنال ذخیره می‌شوند. "
+    "خودِ چت استاد کاوش همیشه با مدل ارزان Gemini (MODEL1) پاسخ می‌دهد و از Qwen استفاده نمی‌کند. "
+    "شخصیتت آرام، باتجربه، صمیمی و در مدیریت ریسک سخت‌گیر است. پاسخ را آموزشی، عملی و قابل‌فهم بده. "
+    "هرگز نتیجه ساختگی، وضعیت اتصال ساختگی یا تضمین سود نده. اگر اطلاعات زنده در متن صفحه نیست، صریح بگو نمی‌دانی. "
+    "بین تحلیل عددی، نظر AI، پیش‌نمایش پلن و سفارش واقعاً اجراشده تفاوت روشن بگذار. "
+    "به پرسش‌های مربوط به RSI، MACD، ATR، روند، خبر، اسپرد، مارجین، لات، ژورنال و همین رابط پاسخ بده. "
+    "از «اطلاعات صفحه» استفاده کن و پاسخ را مگر با درخواست توضیح مفصل، حداکثر در ۳ تا ۶ جمله دقیق و فارسی روان بده. "
     "این برنامه محلی و شخصی است؛ اطلاعات تماس، سفارش خرید یا ثبت‌نام از کاربر درخواست نکن. "
-    "هیچ تضمینِ سود نده و توصیه‌ی سرمایه‌گذاریِ قطعی نکن. لحن: محترم، کوتاه و فارسی روان (حداکثر ۳ تا ۴ جمله)."
+    "هیچ تضمین سود یا توصیه قطعی سرمایه‌گذاری نده."
 )
 
 ASSISTANT_FALLBACK = (
@@ -2015,7 +2501,7 @@ def assistant_chat():
     if not history:
         return jsonify({"ok": False, "error": "empty"}), 400
 
-    api_key, model, endpoint = _ai_config_chat()
+    api_key, model, endpoint = _assistant_ai_config()
     if not api_key:
         reply = ASSISTANT_FALLBACK
         return jsonify({
@@ -2040,6 +2526,7 @@ def assistant_chat():
         "ok": True,
         "reply": reply or ASSISTANT_FALLBACK,
         "assistant": "ostad-kavosh",
+        "model": model,
     })
 
 
@@ -2051,7 +2538,13 @@ def _ai_config_chat():
         or os.getenv("OPENAI_API_KEY")
         or ""
     ).strip()
-    model = (os.getenv("TAHLIL_AI_MODEL") or os.getenv("OPENAI_MODEL") or DEFAULT_OPENAI_MODEL).strip()
+    model = (
+        os.getenv("TAHLIL_AI_PRIMARY_MODEL")
+        or os.getenv("TAHLIL_AI_MODEL1")
+        or os.getenv("TAHLIL_AI_MODEL")
+        or os.getenv("OPENAI_MODEL")
+        or DEFAULT_OPENAI_MODEL
+    ).strip()
     explicit_endpoint = (
         os.getenv("TAHLIL_AI_ENDPOINT")
         or os.getenv("OPENAI_ENDPOINT")
@@ -2061,6 +2554,17 @@ def _ai_config_chat():
         return api_key, model, explicit_endpoint
     base = (os.getenv("TAHLIL_AI_BASE_URL") or os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1").strip().rstrip("/")
     endpoint = base if base.endswith("/chat/completions") else f"{base}/chat/completions"
+    return api_key, model, endpoint
+
+
+def _assistant_ai_config():
+    """Chat is permanently pinned to the inexpensive MODEL1 tier."""
+    api_key, _, endpoint = _ai_config_chat()
+    model = (
+        os.getenv("TAHLIL_AI_MODEL1")
+        or os.getenv("TAHLIL_AI_PRIMARY_MODEL")
+        or DEFAULT_OPENAI_MODEL
+    ).strip()
     return api_key, model, endpoint
 
 

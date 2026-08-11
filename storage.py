@@ -148,6 +148,17 @@ def init_database():
                 ON order_executions(owner_id, created_at DESC);
             """
         )
+        journal_columns = {row[1] for row in db.execute("PRAGMA table_info(journal_entries)")}
+        migrations = {
+            "signal_key": "ALTER TABLE journal_entries ADD COLUMN signal_key TEXT",
+            "order_ticket": "ALTER TABLE journal_entries ADD COLUMN order_ticket INTEGER",
+            "deal_ticket": "ALTER TABLE journal_entries ADD COLUMN deal_ticket INTEGER",
+            "realized_net": "ALTER TABLE journal_entries ADD COLUMN realized_net REAL",
+            "context_json": "ALTER TABLE journal_entries ADD COLUMN context_json TEXT",
+        }
+        for column, statement in migrations.items():
+            if column not in journal_columns:
+                db.execute(statement)
 
 
 def save_analysis(owner_id, symbol, interval, summary):
@@ -197,8 +208,9 @@ def add_journal_entry(owner_id, payload):
             """
             INSERT INTO journal_entries
                 (owner_id, symbol, direction, entry_price, exit_price, stop_loss,
-                 take_profit, status, notes, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 take_profit, status, notes, created_at, updated_at, signal_key,
+                 order_ticket, deal_ticket, realized_net, context_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 owner_id,
@@ -212,9 +224,35 @@ def add_journal_entry(owner_id, payload):
                 payload.get("notes", ""),
                 now,
                 now,
+                payload.get("signal_key"),
+                payload.get("order_ticket"),
+                payload.get("deal_ticket"),
+                payload.get("realized_net"),
+                json.dumps(payload.get("context") or {}, ensure_ascii=False),
             ),
         )
         return cursor.lastrowid
+
+
+def reconcile_journal_entry(owner_id, signal_key, outcome):
+    """Close exactly one broker-linked journal row; never guess by symbol/time."""
+    status = "won" if float(outcome.get("realized_net") or 0) > 0 else (
+        "lost" if float(outcome.get("realized_net") or 0) < 0 else "cancelled"
+    )
+    now = datetime.now(timezone.utc).isoformat()
+    with connection() as db:
+        cursor = db.execute(
+            """
+            UPDATE journal_entries
+               SET exit_price = ?, realized_net = ?, status = ?, updated_at = ?
+             WHERE owner_id = ? AND signal_key = ? AND status = 'open'
+            """,
+            (
+                outcome.get("exit_price"), float(outcome.get("realized_net") or 0),
+                status, now, owner_id, str(signal_key),
+            ),
+        )
+        return bool(cursor.rowcount)
 
 
 def list_journal(owner_id, limit=50):
@@ -223,7 +261,63 @@ def list_journal(owner_id, limit=50):
             "SELECT * FROM journal_entries WHERE owner_id = ? ORDER BY id DESC LIMIT ?",
             (owner_id, limit),
         ).fetchall()
-    return [dict(row) for row in rows]
+    result = []
+    for row in rows:
+        item = dict(row)
+        try:
+            item["context"] = json.loads(item.pop("context_json") or "{}")
+        except (TypeError, ValueError):
+            item["context"] = {}
+        result.append(item)
+    return result
+
+
+def journal_performance(owner_id):
+    """Calculate forward evidence only from reconciled broker-linked outcomes."""
+    with connection() as db:
+        rows = db.execute(
+            """
+            SELECT realized_net, context_json FROM journal_entries
+             WHERE owner_id = ? AND signal_key IS NOT NULL
+               AND status IN ('won', 'lost') AND realized_net IS NOT NULL
+            """,
+            (owner_id,),
+        ).fetchall()
+    values = [float(row["realized_net"]) for row in rows]
+    wins = [value for value in values if value > 0]
+    losses = [value for value in values if value < 0]
+    loss_sum = abs(sum(losses))
+    condition_groups = {}
+    for row in rows:
+        try:
+            context = json.loads(row["context_json"] or "{}")
+        except (TypeError, ValueError):
+            context = {}
+        for field in ("regime", "strategy_family", "interval", "session"):
+            value = str(context.get(field) or "unknown")[:50]
+            bucket = condition_groups.setdefault(field, {}).setdefault(value, [])
+            bucket.append(float(row["realized_net"]))
+    breakdown = {
+        field: {
+            name: {
+                "trades": len(group),
+                "win_rate": round(sum(value > 0 for value in group) / len(group) * 100, 2),
+                "realized_net": round(sum(group), 2),
+            }
+            for name, group in groups.items()
+        }
+        for field, groups in condition_groups.items()
+    }
+    return {
+        "closed_trade_count": len(values),
+        "win_rate": round(len(wins) / len(values) * 100, 2) if values else None,
+        "realized_net": round(sum(values), 2),
+        "profit_factor": round(sum(wins) / loss_sum, 2) if loss_sum else None,
+        "expectancy_amount": round(sum(values) / len(values), 2) if values else None,
+        "evidence_sufficient": len(values) >= 100,
+        "minimum_evidence_trades": 100,
+        "condition_breakdown": breakdown,
+    }
 
 
 def signal_exists(owner_id, signal_key):
@@ -256,6 +350,32 @@ def save_signal_event(owner_id, payload):
             ),
         )
         return bool(cursor.rowcount)
+
+
+def list_signal_events(owner_id, limit=50):
+    """Return automated decisions together with their broker journal outcome."""
+    with connection() as db:
+        rows = db.execute(
+            """
+            SELECT se.id, se.symbol, se.interval, se.candle_time, se.signal,
+                   se.payload_json, se.created_at,
+                   je.status AS trade_status, je.entry_price, je.stop_loss,
+                   je.take_profit, je.exit_price, je.realized_net,
+                   je.order_ticket, je.deal_ticket
+            FROM signal_events AS se
+            LEFT JOIN journal_entries AS je
+              ON je.owner_id = se.owner_id AND je.signal_key = se.signal_key
+            WHERE se.owner_id = ?
+            ORDER BY se.id DESC LIMIT ?
+            """,
+            (owner_id, limit),
+        ).fetchall()
+    result = []
+    for row in rows:
+        item = dict(row)
+        item["details"] = json.loads(item.pop("payload_json"))
+        result.append(item)
+    return result
 
 
 def reserve_order_execution(owner_id, signal_key, token_hash, request_payload):

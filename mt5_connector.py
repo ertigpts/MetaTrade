@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib
 import os
 import threading
+import time
 from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -329,6 +330,10 @@ class MT5Connector:
             "trade_tick_size": float(info_data.get("trade_tick_size") or 0),
             "trade_tick_value": float(info_data.get("trade_tick_value") or 0),
             "time_utc": tick_time.isoformat(),
+            # Some MT5 servers encode their wall-clock offset in the epoch-like
+            # tick value. Expose the raw value so candle boundaries can follow
+            # the terminal server rather than the browser clock.
+            "time_epoch": tick_epoch,
         }
 
     def portfolio_snapshot(self, days: int = 7) -> dict[str, Any]:
@@ -346,18 +351,41 @@ class MT5Connector:
             deals = []
 
         safe_positions = []
+        open_position_count_by_symbol: dict[str, int] = {}
+        aggregate_open_risk = 0.0
+        unprotected_position_count = 0
         for raw in positions:
             item = _namedtuple_dict(raw)
+            symbol = str(item.get("symbol") or "")
+            normalized_symbol = symbol.upper().replace("/", "").replace(" ", "")
+            if normalized_symbol:
+                open_position_count_by_symbol[normalized_symbol] = open_position_count_by_symbol.get(normalized_symbol, 0) + 1
+            open_price = float(item.get("price_open") or 0)
+            stop_loss = float(item.get("sl") or 0)
+            volume = float(item.get("volume") or 0)
+            risk_amount = None
+            if symbol and open_price > 0 and stop_loss > 0 and volume > 0:
+                with MT5_LOCK:
+                    symbol_info = self.mt5.symbol_info(symbol)
+                info = _namedtuple_dict(symbol_info)
+                tick_size = float(info.get("trade_tick_size") or 0)
+                tick_value = float(info.get("trade_tick_value") or 0)
+                if tick_size > 0 and tick_value > 0:
+                    risk_amount = abs(open_price - stop_loss) / tick_size * tick_value * volume
+                    aggregate_open_risk += risk_amount
+            if risk_amount is None:
+                unprotected_position_count += 1
             safe_positions.append({
                 "ticket": int(item.get("ticket") or 0),
-                "symbol": str(item.get("symbol") or ""),
+                "symbol": symbol,
                 "type": int(item.get("type") or 0),
-                "volume": float(item.get("volume") or 0),
-                "price_open": float(item.get("price_open") or 0),
-                "sl": float(item.get("sl") or 0),
+                "volume": volume,
+                "price_open": open_price,
+                "sl": stop_loss,
                 "tp": float(item.get("tp") or 0),
                 "profit": float(item.get("profit") or 0),
                 "magic": int(item.get("magic") or 0),
+                "initial_risk_amount": round(risk_amount, 2) if risk_amount is not None else None,
             })
 
         exit_values = {
@@ -373,6 +401,7 @@ class MT5Connector:
         closed = []
         daily_net = 0.0
         daily_position_ids = set()
+        daily_position_symbols: dict[int, str] = {}
         for raw in deals:
             item = _namedtuple_dict(raw)
             timestamp = int(item.get("time") or 0)
@@ -384,7 +413,9 @@ class MT5Connector:
             ):
                 daily_net += net
                 if item.get("entry") in entry_values:
-                    daily_position_ids.add(int(item.get("position_id") or item.get("order") or item.get("ticket") or 0))
+                    position_id = int(item.get("position_id") or item.get("order") or item.get("ticket") or 0)
+                    daily_position_ids.add(position_id)
+                    daily_position_symbols[position_id] = str(item.get("symbol") or "").upper().replace("/", "").replace(" ", "")
             if item.get("entry") in exit_values:
                 closed.append((timestamp, net))
         closed.sort(key=lambda value: value[0], reverse=True)
@@ -395,12 +426,21 @@ class MT5Connector:
             elif net > 0:
                 break
         latest_loss_timestamp = closed[0][0] if closed and closed[0][1] < 0 else 0
+        daily_trade_count_by_symbol: dict[str, int] = {}
+        for position_id in daily_position_ids:
+            daily_symbol = daily_position_symbols.get(position_id, "")
+            if daily_symbol:
+                daily_trade_count_by_symbol[daily_symbol] = daily_trade_count_by_symbol.get(daily_symbol, 0) + 1
 
         return {
             "open_position_count": len(safe_positions),
             "positions": safe_positions,
+            "open_position_count_by_symbol": open_position_count_by_symbol,
+            "aggregate_open_risk": round(aggregate_open_risk, 2),
+            "unprotected_position_count": unprotected_position_count,
             "daily_realized_net": round(daily_net, 2),
             "daily_trade_count": len({value for value in daily_position_ids if value}),
+            "daily_trade_count_by_symbol": daily_trade_count_by_symbol,
             "consecutive_losses": consecutive_losses,
             "latest_loss_time_utc": (
                 datetime.fromtimestamp(latest_loss_timestamp, tz=timezone.utc).isoformat()
@@ -408,6 +448,56 @@ class MT5Connector:
             ),
             "as_of": now.isoformat(),
         }
+
+    def closed_trade_outcomes(self, days: int = 30, magic: int = 260809) -> list[dict[str, Any]]:
+        """Return exact closed outcomes for this application's broker magic id."""
+        if not self.connected:
+            raise MT5ConnectorError("ابتدا اتصال MT5 را برقرار کنید.")
+        now = datetime.now(timezone.utc)
+        start = now - timedelta(days=min(max(int(days), 1), 90))
+        with MT5_LOCK:
+            deals = self.mt5.history_deals_get(start, now)
+        if deals is None:
+            raise MT5ConnectorError(self._last_error())
+        entry_in = getattr(self.mt5, "DEAL_ENTRY_IN", 0)
+        exits = {
+            getattr(self.mt5, "DEAL_ENTRY_OUT", 1),
+            getattr(self.mt5, "DEAL_ENTRY_INOUT", 2),
+            getattr(self.mt5, "DEAL_ENTRY_OUT_BY", 3),
+        }
+        grouped: dict[int, list[dict[str, Any]]] = {}
+        for raw in deals:
+            item = _namedtuple_dict(raw)
+            if int(item.get("magic") or 0) != int(magic):
+                continue
+            position_id = int(item.get("position_id") or 0)
+            if position_id:
+                grouped.setdefault(position_id, []).append(item)
+
+        outcomes = []
+        for position_id, items in grouped.items():
+            items.sort(key=lambda item: (int(item.get("time") or 0), int(item.get("ticket") or 0)))
+            entries = [item for item in items if item.get("entry") == entry_in]
+            closing = [item for item in items if item.get("entry") in exits]
+            if not entries or not closing:
+                continue
+            realized_net = sum(
+                sum(float(item.get(field) or 0) for field in ("profit", "commission", "swap", "fee"))
+                for item in items
+            )
+            last_exit = closing[-1]
+            outcomes.append({
+                "position_id": position_id,
+                "symbol": str(entries[0].get("symbol") or last_exit.get("symbol") or ""),
+                "entry_deal_tickets": [int(item.get("ticket") or 0) for item in entries],
+                "entry_order_tickets": [int(item.get("order") or 0) for item in entries],
+                "exit_price": float(last_exit.get("price") or 0),
+                "exit_time_utc": datetime.fromtimestamp(
+                    int(last_exit.get("time") or 0), tz=timezone.utc
+                ).isoformat(),
+                "realized_net": round(realized_net, 2),
+            })
+        return sorted(outcomes, key=lambda item: item["exit_time_utc"], reverse=True)
 
     def _checked_market_request(
         self,
@@ -430,9 +520,9 @@ class MT5Connector:
         midpoint = max((float(market["bid"]) + float(market["ask"])) / 2, 1e-9)
         drift_bps = abs(current_price - preview_price) / midpoint * 10_000
         try:
-            maximum_drift_bps = float(os.getenv("TAHLIL_MT5_MAX_ENTRY_DRIFT_BPS", "2.0"))
+            maximum_drift_bps = float(os.getenv("TAHLIL_MT5_MAX_ENTRY_DRIFT_BPS", "5.0"))
         except ValueError:
-            maximum_drift_bps = 2.0
+            maximum_drift_bps = 5.0
         maximum_drift_bps = min(max(maximum_drift_bps, 0.1), 20.0)
         if preview_price <= 0 or drift_bps > maximum_drift_bps:
             raise MT5ConnectorError("قیمت از زمان پیش‌نمایش تغییر کرده است؛ دوباره تحلیل بگیرید.")
@@ -491,17 +581,32 @@ class MT5Connector:
     def send_demo_order(self, requested_symbol: str, direction: str, plan: dict[str, Any]) -> dict[str, Any]:
         """Send one checked order. Caller must enforce demo account and explicit confirmation."""
         request_payload, check, market = self._checked_market_request(requested_symbol, direction, plan)
-        with MT5_LOCK:
-            result = self.mt5.order_send(request_payload)
-        if result is None:
-            raise MT5ConnectorError(self._last_error())
-        result_data = _namedtuple_dict(result)
         accepted = {
             getattr(self.mt5, "TRADE_RETCODE_PLACED", 10008),
             getattr(self.mt5, "TRADE_RETCODE_DONE", 10009),
             getattr(self.mt5, "TRADE_RETCODE_DONE_PARTIAL", 10010),
         }
-        retcode = int(result_data.get("retcode") or 0)
+        result_data = {}
+        retcode = 0
+        for attempt in range(2):
+            with MT5_LOCK:
+                result = self.mt5.order_send(request_payload)
+            if result is None:
+                raise MT5ConnectorError(self._last_error())
+            result_data = _namedtuple_dict(result)
+            retcode = int(result_data.get("retcode") or 0)
+            if retcode in accepted:
+                break
+            # 10031 explicitly means the server did not receive/execute the
+            # request because the terminal had no network connection. One
+            # fresh check+retry is safe and avoids duplicate execution.
+            if retcode == 10031 and attempt == 0:
+                time.sleep(0.75)
+                request_payload, check, market = self._checked_market_request(
+                    requested_symbol, direction, plan
+                )
+                continue
+            break
         if retcode not in accepted:
             raise MT5ConnectorError(
                 f"سرور معامله سفارش را نپذیرفت ({retcode}): {str(result_data.get('comment') or '')[:180]}"
@@ -530,7 +635,10 @@ class MT5Connector:
         timeframe_name = TIMEFRAME_NAMES.get(normalized_interval)
         if not timeframe_name:
             raise MT5ConnectorError("تایم‌فریم MT5 پشتیبانی نمی‌شود.")
-        count = min(max(int(count), 50), 5_000)
+        # Execution endpoints impose their own smaller limits. Research needs a
+        # longer closed-candle history, especially on M15, to span multiple
+        # regimes instead of judging a strategy on only a few recent months.
+        count = min(max(int(count), 50), 20_000)
         symbol = self._resolve_symbol(requested_symbol)
         timeframe = getattr(self.mt5, timeframe_name)
         start_pos = 0 if include_incomplete else 1

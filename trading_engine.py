@@ -25,6 +25,8 @@ class SignalSettings:
     reward_risk: float = 2.0
     maximum_daily_loss_percent: float = 1.0
     maximum_open_positions: int = 1
+    maximum_symbol_open_positions: int = 1
+    maximum_symbol_daily_trades: int = 1
     maximum_consecutive_losses: int = 2
     loss_cooldown_hours: int = 12
     maximum_daily_trades: int = 3
@@ -50,12 +52,16 @@ class SignalSettings:
             raise TradingRuleError("حد زیان روزانه باید بین ۰٫۲۵ و ۵ درصد باشد.")
         if not 1 <= int(self.maximum_open_positions) <= 5:
             raise TradingRuleError("حداکثر پوزیشن باز باید بین ۱ و ۵ باشد.")
+        if not 1 <= int(self.maximum_symbol_open_positions) <= 5:
+            raise TradingRuleError("سقف پوزیشن باز هر نماد باید بین ۱ و ۵ باشد.")
+        if not 1 <= int(self.maximum_symbol_daily_trades) <= 10:
+            raise TradingRuleError("سقف معامله روزانه هر نماد باید بین ۱ و ۱۰ باشد.")
         if not 1 <= int(self.maximum_consecutive_losses) <= 10:
             raise TradingRuleError("حد زیان‌های متوالی باید بین ۱ و ۱۰ باشد.")
         if not 4 <= int(self.loss_cooldown_hours) <= 72:
             raise TradingRuleError("توقف بعد از زیان باید بین ۴ و ۷۲ ساعت باشد.")
-        if not 1 <= int(self.maximum_daily_trades) <= 10:
-            raise TradingRuleError("سقف معامله روزانه باید بین ۱ و ۱۰ باشد.")
+        if not 1 <= int(self.maximum_daily_trades) <= 20:
+            raise TradingRuleError("سقف معامله روزانه باید بین ۱ و ۲۰ باشد.")
         if not 50 <= int(self.ai_minimum_confidence) <= 95:
             raise TradingRuleError("حداقل اطمینان AI باید بین ۵۰ و ۹۵ باشد.")
         return self
@@ -115,10 +121,19 @@ def generate_signal(
     ) if account_status else True
     fresh_market = bool(market.get("market_open")) and bool(market.get("tick_fresh")) if "market_open" in market else True
     position_limit_ok = int(portfolio.get("open_position_count") or 0) < settings.maximum_open_positions
+    normalized_symbol = str(symbol or "").upper().replace("/", "").replace(" ", "")
+    open_by_symbol = portfolio.get("open_position_count_by_symbol") or {}
+    daily_by_symbol = portfolio.get("daily_trade_count_by_symbol") or {}
+    symbol_position_limit_ok = int(open_by_symbol.get(normalized_symbol) or 0) < settings.maximum_symbol_open_positions
+    symbol_daily_trade_limit_ok = int(daily_by_symbol.get(normalized_symbol) or 0) < settings.maximum_symbol_daily_trades
     equity = float(account.get("equity") or 0)
     daily_net = float(portfolio.get("daily_realized_net") or 0)
     daily_loss_percent = abs(min(0.0, daily_net)) / equity * 100 if equity > 0 else 0.0
     daily_loss_ok = daily_loss_percent < settings.maximum_daily_loss_percent
+    unprotected_positions_ok = int(portfolio.get("unprotected_position_count") or 0) == 0
+    aggregate_open_risk = float(portfolio.get("aggregate_open_risk") or 0)
+    aggregate_open_risk_percent = aggregate_open_risk / equity * 100 if equity > 0 else 0.0
+    aggregate_open_risk_ok = aggregate_open_risk_percent < settings.maximum_daily_loss_percent
     loss_streak = int(portfolio.get("consecutive_losses") or 0)
     latest_loss_time = portfolio.get("latest_loss_time_utc")
     cooldown_until = None
@@ -162,9 +177,13 @@ def generate_signal(
         "market_open_and_fresh": fresh_market,
         "terminal_and_account_ready": terminal_ready,
         "position_limit": position_limit_ok,
+        "symbol_position_limit": symbol_position_limit_ok,
+        "all_open_positions_protected": unprotected_positions_ok,
+        "aggregate_open_risk_limit": aggregate_open_risk_ok,
         "daily_loss_limit": daily_loss_ok,
         "loss_streak_limit": loss_streak_ok,
         "daily_trade_limit": daily_trade_limit_ok,
+        "symbol_daily_trade_limit": symbol_daily_trade_limit_ok,
         "true_timeframes_aligned": timeframe_ok,
         "macro_risk_clear": macro_ok,
         "ai_confirmed": ai_ok,
@@ -195,12 +214,20 @@ def generate_signal(
         reasons.append("اجازه معامله در ترمینال، حساب یا Expert Advisor فعال نیست.")
     if not filters["position_limit"]:
         reasons.append("حداکثر تعداد پوزیشن باز پر شده است.")
+    if not filters["symbol_position_limit"]:
+        reasons.append("سقف پوزیشن باز این نماد پر شده است.")
+    if not filters["all_open_positions_protected"]:
+        reasons.append("حداقل یک پوزیشن باز بدون حد ضرر قابل محاسبه است؛ سیگنال جدید مسدود شد.")
+    if not filters["aggregate_open_risk_limit"]:
+        reasons.append("ریسک تجمیعی پوزیشن‌های باز به سقف زیان مجاز رسیده است.")
     if not filters["daily_loss_limit"]:
         reasons.append(f"زیان امروز به سقف {settings.maximum_daily_loss_percent}% رسیده است.")
     if not filters["loss_streak_limit"]:
         reasons.append(f"پس از زیان‌های متوالی تا {cooldown_until.isoformat() if cooldown_until else '-'} توقف موقت فعال است.")
     if not filters["daily_trade_limit"]:
         reasons.append(f"سقف {settings.maximum_daily_trades} معامله دمو در امروز پر شده است.")
+    if not filters["symbol_daily_trade_limit"]:
+        reasons.append(f"سقف {settings.maximum_symbol_daily_trades} معامله دمو برای این نماد در امروز پر شده است.")
     if not filters["true_timeframes_aligned"]:
         reasons.append("تایم‌فریم‌های واقعی H1، H4 و D1 هم‌جهت نیستند.")
     if not filters["macro_risk_clear"]:
@@ -308,4 +335,32 @@ def build_risk_plan(
         "equity": round(equity, 2),
         "currency": str(account.get("currency") or ""),
         "validated": math.isfinite(volume) and volume >= volume_min and volume <= volume_max,
+    }
+
+
+def capital_feasibility(summary, market, *, equity, risk_percent, atr_stop_multiple, risk_multiplier=1.0):
+    """Explain whether broker minimum volume fits the requested risk budget."""
+    atr = float(summary.get("latest_atr") or 0)
+    point = float(market.get("point") or 0)
+    tick_size = float(market.get("trade_tick_size") or 0)
+    tick_value = float(market.get("trade_tick_value") or 0)
+    volume_min = float(market.get("volume_min") or 0)
+    stops_level = int(market.get("trade_stops_level") or 0)
+    if min(atr, point, tick_size, tick_value, volume_min, float(equity)) <= 0:
+        return {"feasible": False, "reason": "missing_contract_or_account_data"}
+    effective_risk_percent = float(risk_percent) * max(0.25, min(float(risk_multiplier), 1.0))
+    stop_distance = max(atr * float(atr_stop_multiple), point * max(stops_level, 1))
+    risk_per_lot = (stop_distance / tick_size) * tick_value
+    minimum_volume_risk = volume_min * risk_per_lot
+    risk_budget = float(equity) * effective_risk_percent / 100
+    minimum_equity = minimum_volume_risk / (effective_risk_percent / 100)
+    return {
+        "feasible": risk_budget + 1e-9 >= minimum_volume_risk,
+        "equity": round(float(equity), 2),
+        "effective_risk_percent": round(effective_risk_percent, 4),
+        "risk_budget": round(risk_budget, 2),
+        "broker_minimum_volume": volume_min,
+        "minimum_volume_risk": round(minimum_volume_risk, 2),
+        "minimum_equity_for_profile": round(minimum_equity, 2),
+        "stop_distance": round(stop_distance, int(market.get("digits") or 5)),
     }

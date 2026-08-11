@@ -6,7 +6,7 @@
   <meta name="csrf-token" content="{{ csrf_token }}">
   <title>TradeAI · داشبورد</title>
   <link rel="icon" type="image/webp" href="{{ url_for('static', filename='tradeai-logo.webp') }}">
-  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}?v=20260809-4">
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}?v=20260810-6">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
 </head>
 <body>
@@ -78,24 +78,41 @@
           <button id="mt5FetchBtn" class="btn btn-primary" type="button" data-i18n="mt5.fetch">Load candles from MT5</button>
           <span id="mt5Market" class="mt5-market">-</span>
         </div>
+        <details class="compact-details mt5-advanced-settings">
+          <summary>تنظیمات پیشرفته ریسک و اجرای MT5</summary>
         <div class="mt5-settings">
           <label><span data-i18n="mt5.minStrength">Minimum strength</span><input id="mt5MinStrength" type="number" min="50" max="88" value="70"></label>
           <label><span data-i18n="mt5.maxSpread">Maximum spread (bps)</span><input id="mt5MaxSpread" type="number" min="0.1" max="20" step="0.1" value="3"></label>
-          <label><span data-i18n="mt5.riskPercent">Risk per signal (%)</span><input id="mt5RiskPercent" type="number" min="0.1" max="2" step="0.1" value="0.1"></label>
+          <label><span data-i18n="mt5.riskPercent">Risk per signal (%)</span><input id="mt5RiskPercent" type="number" min="0.1" max="2" step="0.1" value="0.1" readonly title="Controlled by the selected validated profile"></label>
           <label><span data-i18n="mt5.maxVolume">Maximum volume (lot)</span><input id="mt5MaxVolume" type="number" min="0.01" max="100" step="0.01" value="0.10"></label>
-          <label><span data-i18n="mt5.atrStop">ATR stop multiple</span><input id="mt5AtrStop" type="number" min="0.5" max="5" step="0.1" value="1.0"></label>
-          <label><span data-i18n="mt5.rewardRisk">Reward/Risk</span><input id="mt5RewardRisk" type="number" min="1" max="5" step="0.1" value="2.5"></label>
+          <label><span data-i18n="mt5.atrStop">ATR stop multiple</span><input id="mt5AtrStop" type="number" min="0.5" max="5" step="0.1" value="2.0" readonly title="Controlled by the selected validated profile"></label>
+          <label><span data-i18n="mt5.rewardRisk">Reward/Risk</span><input id="mt5RewardRisk" type="number" min="1" max="5" step="0.1" value="2.0" readonly title="Controlled by the selected validated profile"></label>
           <label><span>حد زیان روزانه (%)</span><input id="mt5DailyLoss" type="number" min="0.25" max="5" step="0.25" value="1"></label>
           <label><span>حد زیان متوالی</span><input id="mt5LossStreak" type="number" min="1" max="10" value="2"></label>
           <label><span>توقف بعد از زیان (ساعت)</span><input id="mt5LossCooldown" type="number" min="4" max="72" value="12"></label>
-          <label><span>سقف معاملات روزانه</span><input id="mt5DailyTradesLimit" type="number" min="1" max="10" value="3"></label>
+          <label><span>سقف معاملات روزانه کل حساب</span><input id="mt5DailyTradesLimit" type="number" min="1" max="20" value="20"></label>
           <label><span>حداقل اطمینان AI</span><input id="mt5AiConfidence" type="number" min="50" max="95" value="70"></label>
         </div>
-        <button id="mt5SignalBtn" class="btn mt5-signal-btn" type="button">تحلیل کامل و آماده‌سازی معامله دمو</button>
+        <p class="muted">ریسک، ضریب حد ضرر و نسبت سود به زیان از پریست انتخاب‌شده می‌آیند و قفل هستند؛ تنظیمات دیگر فقط در محدوده ایمن موتور اعمال می‌شوند.</p>
+        </details>
+        <div class="quick-demo-actions">
+          <button id="mt5SignalBtn" class="btn mt5-signal-btn" type="button">۱) تحلیل عددی استراتژی بدون AI — لات 0.01</button>
+          <button id="quickDemoAnalyzeBtn" class="btn quick-demo-btn" type="button">۲) تحلیل با Gemini ارزان — لات 0.05</button>
+          <button id="expensiveAiReviewBtn" class="btn secondary-btn" type="button">۳) داوری دستی با Qwen گران — لات 0.08</button>
+          <small>به‌ترتیب: بدون هزینه AI با لات 0.01، مدل ارزان با لات 0.05 و داوری مدل گران با لات 0.08. قبل از ارسال می‌توانید حجم و حدود را تغییر دهید.</small>
+        </div>
         <div id="mt5SignalResult" class="mt5-signal-result hidden"></div>
         <div id="demoExecutionPanel" class="demo-execution hidden">
           <strong>تأیید نهایی سفارش دمو</strong>
           <p>پس از بررسی ورود، حد ضرر، هدف و حجم، عبارت <b>DEMO</b> را وارد کنید. هر توکن فقط یک‌بار و تا ۵ دقیقه معتبر است.</p>
+          <div class="quick-plan-grid">
+            <label><span>جهت</span><input id="quickDirection" readonly></label>
+            <label><span>ورود لحظه تحلیل</span><input id="quickEntry" type="number" readonly></label>
+            <label><span>حجم (لات)</span><input id="quickVolume" type="number" min="0.01" max="0.10" step="0.01"></label>
+            <label><span>حد ضرر</span><input id="quickStopLoss" type="number" step="0.01"></label>
+            <label><span>حد سود</span><input id="quickTakeProfit" type="number" step="0.01"></label>
+          </div>
+          <small class="muted">حجم اجرای سریع فقط بین 0.01 تا 0.10 است. حد ضرر را می‌توان نزدیک‌تر کرد، اما برای افزایش ریسک نمی‌توان دورتر برد.</small>
           <div class="demo-execution-row">
             <input id="demoConfirmation" autocomplete="off" placeholder="DEMO" aria-label="تأیید سفارش دمو">
             <button id="demoExecuteBtn" class="btn danger-btn" type="button">ارسال سفارش به حساب DEMO</button>
@@ -103,6 +120,13 @@
           <small id="demoExecutionStatus" class="muted"></small>
         </div>
         <p class="mt5-safety">اجرای حساب واقعی قفل است. سفارش فقط پس از عبور بازار، خبر، H1/H4/D1، ریسک، AI، بررسی کارگزاری و تأیید دستی ارسال می‌شود.</p>
+        <section class="mt5-history-panel">
+          <div class="section-heading">
+            <h2 data-i18n="history.title">تاریخچه تحلیل و تصمیم‌های خودکار</h2>
+            <button id="refreshHistoryBtn" class="ghost-btn" type="button" data-i18n="history.refresh">به‌روزرسانی</button>
+          </div>
+          <div id="historyList" class="record-list"><p class="muted">هنوز تحلیلی ذخیره نشده است.</p></div>
+        </section>
         {% else %}
         <div class="mt5-login-note">
           <p data-i18n="mt5.loginRequired">Sign in to connect the local MetaTrader 5 terminal.</p>
@@ -146,30 +170,27 @@
       </div>
       </details>
 
-      <section class="tool-panel mt16">
+      <section class="tool-panel mt16" id="strategyPresetPanel">
         <h2 data-i18n="strategy.title">Strategy preset</h2>
+        <div class="candle-clock" id="candleClock" aria-live="polite">
+          <div class="candle-clock-main">
+            <span class="candle-clock-tf" id="candleClockTimeframe">H4</span>
+            <div>
+              <small id="candleClockLabel">زمان باقی‌مانده تا بسته‌شدن کندل</small>
+              <strong id="candleClockRemaining">--:--:--</strong>
+            </div>
+            <small class="candle-clock-close" id="candleClockClose">-</small>
+          </div>
+          <div class="candle-clock-track"><span id="candleClockProgress"></span></div>
+          <small class="candle-clock-phase" id="candleClockPhase">-</small>
+        </div>
+        <div class="candle-automation" id="candleAutomation">
+          <label class="demo-lab-toggle"><input id="demoLabMode" type="checkbox"> آزمایشگاه DEMO طلا H4: هر ساعت یک معامله با حجم‌های 0.01 تا 0.04</label>
+          <label><input id="autoCandleAnalysis" type="checkbox"> تحلیل خودکار بعد از بسته‌شدن هر کندل</label>
+          <label><input id="autoDemoExecution" type="checkbox" disabled> اجرای خودکار سفارش فقط روی حساب DEMO پس از عبور همه فیلترها</label>
+          <small id="autoCandleStatus">خاموش؛ با تازه‌سازی صفحه دوباره خاموش می‌شود.</small>
+        </div>
         <div class="preset-grid">
-          <label class="preset-option hidden" aria-hidden="true">
-            <input type="radio" name="strategyPreset" value="scalp">
-            <span>
-              <strong data-i18n="strategy.scalp">Scalp</strong>
-              <small data-i18n="strategy.scalpNote">Fast signals for short holds.</small>
-            </span>
-          </label>
-          <label class="preset-option hidden" aria-hidden="true">
-            <input type="radio" name="strategyPreset" value="day">
-            <span>
-              <strong data-i18n="strategy.day">Day trade</strong>
-              <small data-i18n="strategy.dayNote">Balanced intraday settings.</small>
-            </span>
-          </label>
-          <label class="preset-option hidden" aria-hidden="true">
-            <input type="radio" name="strategyPreset" value="swing">
-            <span>
-              <strong data-i18n="strategy.swing">Swing</strong>
-              <small data-i18n="strategy.swingNote">Smoother signals for longer moves.</small>
-            </span>
-          </label>
           <label class="preset-option research-preset">
             <input type="radio" name="strategyPreset" value="goldDemo" checked>
             <span>
@@ -177,9 +198,30 @@
               <small data-i18n="strategy.goldDemoNote">Walk-forward candidate; signals only, no orders.</small>
             </span>
           </label>
+          <label class="preset-option research-preset">
+            <input type="radio" name="strategyPreset" value="goldM15Demo">
+            <span>
+              <strong>Gold M15 · تست سریع دمو</strong>
+              <small>Experimental؛ EMA 21/89، نگهداری پژوهشی ۶ کندل، Validation ناموفق.</small>
+            </span>
+          </label>
+          <label class="preset-option research-preset">
+            <input type="radio" name="strategyPreset" value="eurDemo">
+            <span><strong>EURUSD H4 · تست دمو</strong><small>آزمایشی؛ تا ۵ ورود متوالی روزانه، فقط یک پوزیشن هم‌زمان.</small></span>
+          </label>
+          <label class="preset-option research-preset">
+            <input type="radio" name="strategyPreset" value="gbpDemo">
+            <span><strong>GBPUSD H4 · تست دمو</strong><small>آزمایشی؛ تا ۵ ورود متوالی روزانه، فقط یک پوزیشن هم‌زمان.</small></span>
+          </label>
+          <label class="preset-option research-preset">
+            <input type="radio" name="strategyPreset" value="jpyDemo">
+            <span><strong>USDJPY H4 · تست دمو</strong><small>آزمایشی؛ تا ۵ ورود متوالی روزانه، فقط یک پوزیشن هم‌زمان.</small></span>
+          </label>
         </div>
       </section>
 
+      <details class="tool-panel compact-details mt16">
+        <summary>اندیکاتورها، نمودارها و پنل تصمیم</summary>
       <form id="indicatorForm" class="form-grid mt16">
         <div class="row indicator-options">
           <div>
@@ -293,8 +335,10 @@
           <canvas id="macdChart"></canvas>
         </div>
       </div>
+      </details>
 
-      <section class="tool-panel mt16">
+      <details class="tool-panel compact-details mt16">
+        <summary>بک‌تست استراتژی</summary>
         <div class="section-heading">
           <div>
             <h2 data-i18n="backtest.title">Strategy backtest</h2>
@@ -309,18 +353,25 @@
           <input id="feeBps" type="number" min="0" max="100" step="0.1" value="2">
         </div>
         <div id="backtestResult" class="backtest-result hidden"></div>
-      </section>
+      </details>
 
-      <div class="split mt16">
-        <section class="tool-panel">
-          <div class="section-heading">
-            <h2 data-i18n="history.title">Analysis history</h2>
-            <button id="refreshHistoryBtn" class="ghost-btn" type="button" data-i18n="history.refresh">Refresh</button>
+      <details class="tool-panel compact-details mt16">
+        <summary>پژوهش چندبازاری و اعتبارسنجی سریع</summary>
+        <div class="section-heading">
+          <div>
+            <h2>Multi-asset research replay</h2>
+            <p class="muted">نتایج H4، H1 و M15؛ فقط پروفایل‌های مشخص‌شده می‌توانند با تأیید دستی، داده Forward دمو جمع کنند.</p>
           </div>
-          <div id="historyList" class="record-list"><p class="muted">No saved analysis yet.</p></div>
-        </section>
+          <button id="multiAssetRefreshBtn" class="ghost-btn" type="button">Refresh research</button>
+          <button id="fastValidationBtn" class="btn" type="button">اعتبارسنجی سریع خودکار</button>
+        </div>
+        <p class="muted">بدون ارسال سفارش؛ بازپخش پنج پروفایل ثابت روی ۵۰۰۰ کندل بسته‌شده MT5.</p>
+        <div id="fastValidationResult" class="record-list"></div>
+        <div id="multiAssetResearch" class="record-list"><p class="muted">Loading research results…</p></div>
+      </details>
 
-        <section class="tool-panel">
+      <details class="tool-panel compact-details mt16">
+          <summary>ژورنال معاملات</summary>
           <h2 data-i18n="journal.title">Trading journal</h2>
           <form id="journalForm" class="journal-form">
             <input id="journalSymbol" aria-label="Journal symbol" value="EUR/USD" placeholder="EUR/USD" required>
@@ -342,10 +393,10 @@
             <button class="btn" type="submit" data-i18n="journal.save">Save entry</button>
           </form>
           <div id="journalList" class="record-list"><p class="muted">No journal entries yet.</p></div>
-        </section>
-      </div>
+      </details>
 
-      <section class="tool-panel mt16">
+      <details class="tool-panel compact-details mt16">
+        <summary>محاسبه‌گر ریسک</summary>
         <h2 data-i18n="risk.title">Risk calculator</h2>
         <div class="risk-grid">
           <label for="accountBalance" data-i18n="risk.balance">Account balance</label>
@@ -362,7 +413,7 @@
           <strong id="riskLotSize">-</strong>
           <small id="riskAmount">-</small>
         </div>
-      </section>
+      </details>
 
       <section class="ai-panel mt16">
         <h2>توضیح تکمیلی استاد کاوش</h2>
@@ -509,7 +560,7 @@
         panel.classList.add('open');
         if (!greeted) {
           greeted = true;
-          add('bot', 'سلام، من استاد کاوش هستم؛ هم برای آموزش معامله‌گری کنار شما هستم و هم تحلیل همین صفحه و مدیریت ریسک معامله‌تان را بررسی می‌کنم. از گزینه‌های پیشنهادی استفاده کنید یا سؤال خودتان را بنویسید.');
+          add('bot', 'سلام، من استاد کاوشِ به‌روزشده هستم. سه مسیر فعلی برنامه را می‌شناسم: تحلیل عددی بدون AI، Gemini ارزان و Qwen گرانِ کاملاً دستی. درباره پلن، لات، مارجین، خبر، ژورنال یا وضعیت همین صفحه سؤال کن؛ تفاوت تحلیل و سفارش واقعاً اجراشده را هم دقیق می‌گویم.');
         }
         if (seed) add('bot', seed);
         input.focus();
@@ -562,6 +613,6 @@
     })();
   </script>
 
-  <script src="{{ url_for('static', filename='dashboard.js') }}?v=20260809-4"></script>
+  <script src="{{ url_for('static', filename='dashboard.js') }}?v=20260811-06"></script>
 </body>
 </html>
